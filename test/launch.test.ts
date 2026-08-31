@@ -213,7 +213,7 @@ describe("native launch planning", () => {
     const originalCwd = join(dirname(ctx.parentCwd), "original-work");
     mkdirSync(originalCwd);
     ctx.resumePolicy = {
-      version: 1,
+      version: 2,
       cwd: originalCwd,
       model: "openai/gpt-5",
       thinking: "high",
@@ -221,8 +221,7 @@ describe("native launch planning", () => {
       allowNestedDelegation: false,
       denyTools: "subagent,subagent_resume,subagent_interrupt,subagents_list",
       agent: "worker",
-      interactive: true,
-      autoExit: false,
+      lifecycleMode: "interactive",
     };
 
     const plan = buildResumeLaunchPlan({ sessionPath: "/tmp/prior.jsonl" }, ctx);
@@ -253,6 +252,43 @@ describe("native launch planning", () => {
     assert.equal(plan.paneSplit.env.PI_SUBAGENT_AUTO_EXIT, undefined);
     assert.deepEqual(plan.agentStart.argv.slice(0, 2), ["--session", sessionPath]);
     assert.deepEqual(plan.initialPrompts, [`@${plan.resumeMessageFile}`]);
+  });
+
+  it("reapplies a manual lifecycle instead of deriving interactive from auto-exit", () => {
+    const ctx = fixture();
+    ctx.resumePolicy = {
+      version: 2,
+      cwd: ctx.parentCwd,
+      allowNestedDelegation: true,
+      lifecycleMode: "manual",
+    };
+
+    const plan = buildResumeLaunchPlan({ sessionPath: "/tmp/manual.jsonl" }, ctx);
+
+    assert.equal(plan.interactive, false);
+    assert.equal(plan.autoExit, false);
+    assert.equal(plan.paneSplit.env.PI_SUBAGENT_INTERACTIVE, undefined);
+    assert.equal(plan.paneSplit.env.PI_SUBAGENT_AUTO_EXIT, undefined);
+  });
+
+  it("never rewrites the persisted launch policy on resume", () => {
+    const ctx = fixture();
+    ctx.resumePolicy = {
+      version: 2,
+      cwd: ctx.parentCwd,
+      allowNestedDelegation: true,
+      lifecycleMode: "manual",
+    };
+
+    // An explicit override changes this run's lifecycle only.
+    const plan = buildResumeLaunchPlan({ sessionPath: "/tmp/manual.jsonl", autoExit: true }, ctx);
+
+    assert.equal(plan.autoExit, true);
+    assert.equal(
+      plan.files.some((file) => file.path.includes("herdr-launch-policy")),
+      false,
+      "resume plans must not write the policy sidecar",
+    );
   });
 });
 

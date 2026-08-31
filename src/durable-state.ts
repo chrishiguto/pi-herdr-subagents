@@ -20,6 +20,7 @@ import { join } from "node:path";
 
 import { hasMatchingActiveChildIdentity } from "./active-children.ts";
 import { readExitSidecar } from "./child-protocol.ts";
+import { LIFECYCLE_MODES, type LifecycleMode } from "./launch-policy.ts";
 import type { AgentInfo } from "./herdr/client.ts";
 
 export const DURABLE_STATE_VERSION = 1 as const;
@@ -34,7 +35,7 @@ export interface DurableChildRecord {
   terminalId?: string;
   liveAgentName: string;
   sessionFile: string;
-  lifecycleMode: "autonomous" | "interactive" | "manual";
+  lifecycleMode: LifecycleMode;
   resumeLockPath?: string;
   createdAt: string;
 }
@@ -75,9 +76,7 @@ function isRecord(value: unknown): value is DurableChildRecord {
     (record.terminalId === undefined || typeof record.terminalId === "string") &&
     typeof record.liveAgentName === "string" &&
     typeof record.sessionFile === "string" &&
-    (record.lifecycleMode === "autonomous" ||
-      record.lifecycleMode === "interactive" ||
-      record.lifecycleMode === "manual") &&
+    (LIFECYCLE_MODES as readonly unknown[]).includes(record.lifecycleMode) &&
     (record.resumeLockPath === undefined || typeof record.resumeLockPath === "string") &&
     typeof record.createdAt === "string"
   );

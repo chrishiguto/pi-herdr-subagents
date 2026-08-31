@@ -24,6 +24,7 @@ import {
 } from "./durable-state.ts";
 import type { AgentStartResult, HerdrClient } from "./herdr/client.ts";
 import { probeHerdrReadiness } from "./herdr/compatibility.ts";
+import { lifecycleFlags, lifecycleModeOf } from "./launch-policy.ts";
 import type { LaunchPlan, ResumeLaunchPlan } from "./launch.ts";
 import { buildOutcomeMessage } from "./messages.ts";
 import { appendChildTranscriptMarker, publishSubagentActivity } from "./runtime-events.ts";
@@ -165,11 +166,7 @@ async function launchTrackedChild(
           paneId,
           liveAgentName: plan.agentStart.liveAgentName,
           sessionFile: plan.sessionFile,
-          lifecycleMode: plan.interactive
-            ? "interactive"
-            : plan.autoExit
-              ? "autonomous"
-              : "manual",
+          lifecycleMode: lifecycleModeOf(plan),
           ...("resumeLockPath" in plan && plan.resumeLockPath
             ? { resumeLockPath: plan.resumeLockPath }
             : {}),
@@ -261,8 +258,7 @@ function runningFromDurableRecord(
     startTime: Date.parse(record.createdAt) || Date.now(),
     sessionFile: record.sessionFile,
     durableStateDir,
-    interactive: record.lifecycleMode === "interactive",
-    autoExit: record.lifecycleMode === "autonomous",
+    ...lifecycleFlags(record.lifecycleMode),
     resumeLockPath: record.resumeLockPath,
   };
 }

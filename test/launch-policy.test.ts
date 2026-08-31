@@ -1,144 +1,88 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { resolveRuntimePolicy } from "../src/launch.ts";
+import {
+  launchPolicyPath,
+  lifecycleFlags,
+  lifecycleModeOf,
+  readLaunchPolicy,
+  serializeLaunchPolicy,
+  type LaunchPolicy,
+} from "../src/launch-policy.ts";
 
 const cleanups: Array<() => void> = [];
-
 afterEach(() => {
   while (cleanups.length) cleanups.pop()!();
 });
 
-function projectFixture() {
-  const root = mkdtempSync(join(tmpdir(), "herdr-policy-"));
+function sessionFile(): string {
+  const root = mkdtempSync(join(tmpdir(), "launch-policy-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const project = join(root, "project");
-  const child = join(project, "packages", "child");
-  mkdirSync(child, { recursive: true });
-  return { root, project, child };
+  return join(root, "child.jsonl");
 }
 
-describe("runtime policy", () => {
-  it("resolves all request overrides without an agent definition", () => {
-    const { project, child } = projectFixture();
-    const policy = resolveRuntimePolicy(
-      {
-        cwd: "packages/child",
-        model: "openai/gpt-5",
-        thinking: "high",
-        tools: ["read", "bash"],
-        allowNestedDelegation: false,
-      },
-      null,
-      {
-        parentCwd: project,
-        isModelAvailable: (model) => model === "openai/gpt-5",
-      },
-    );
-
-    assert.deepEqual(policy, {
-      cwd: child,
+describe("launch policy sidecar", () => {
+  it("round-trips a serialized policy", () => {
+    const session = sessionFile();
+    const policy: LaunchPolicy = {
+      version: 2,
+      cwd: "/work",
       model: "openai/gpt-5",
       thinking: "high",
       tools: ["read", "bash"],
       allowNestedDelegation: false,
-    });
+      denyTools: "subagent",
+      agent: "worker",
+      lifecycleMode: "manual",
+    };
+    writeFileSync(launchPolicyPath(session), serializeLaunchPolicy(policy));
+
+    assert.deepEqual(readLaunchPolicy(session), { kind: "ok", policy });
   });
 
-  it("resolves a relative agent-definition cwd against the agent config directory", () => {
-    const { root, project } = projectFixture();
-    const agentDir = join(root, "agent-config");
-    const target = join(agentDir, "agent-sub");
-    mkdirSync(target, { recursive: true });
-    const saved = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = agentDir;
-    cleanups.push(() => {
-      if (saved == null) delete process.env.PI_CODING_AGENT_DIR;
-      else process.env.PI_CODING_AGENT_DIR = saved;
-    });
-
-    const policy = resolveRuntimePolicy({}, { cwd: "agent-sub" }, { parentCwd: project });
-    assert.equal(policy.cwd, target);
-  });
-
-  it("inherits normal tools and allows nesting when no policy overrides are supplied", () => {
-    const { project } = projectFixture();
-    const policy = resolveRuntimePolicy({}, null, { parentCwd: project });
-    assert.equal(policy.tools, undefined);
-    assert.equal(policy.allowNestedDelegation, true);
-    assert.equal(policy.cwd, project);
-  });
-
-  it("lets every request field override agent defaults and accepts an absolute cwd", () => {
-    const { child } = projectFixture();
-    const policy = resolveRuntimePolicy(
-      {
-        cwd: child,
-        model: "openai/request-model",
-        thinking: "low",
-        tools: ["read"],
+  it("migrates a version-1 policy's lifecycle booleans into the mode enum", () => {
+    const session = sessionFile();
+    writeFileSync(
+      launchPolicyPath(session),
+      JSON.stringify({
+        version: 1,
+        cwd: "/work",
         allowNestedDelegation: true,
-      },
-      {
-        cwd: "agent-cwd",
-        model: "openai/agent-model",
-        thinking: "high",
-        tools: "bash,write",
-        spawning: false,
-      },
-      {
-        parentCwd: child,
-        isModelAvailable: (model) => model === "openai/request-model",
-      },
+        interactive: false,
+        autoExit: false,
+      }),
     );
 
-    assert.deepEqual(policy, {
-      cwd: child,
-      model: "openai/request-model",
-      thinking: "low",
-      tools: ["read"],
-      allowNestedDelegation: true,
-    });
+    const read = readLaunchPolicy(session);
+    assert.equal(read.kind, "ok");
+    assert.equal(read.kind === "ok" && read.policy.lifecycleMode, "manual");
   });
 
-  it("rejects invalid directories, models, thinking levels, tools, and nesting values", () => {
-    const { project, root } = projectFixture();
-    const file = join(root, "not-a-directory");
-    writeFileSync(file, "x");
+  it("distinguishes an absent sidecar from a corrupt one", () => {
+    const absent = sessionFile();
+    assert.deepEqual(readLaunchPolicy(absent), { kind: "absent" });
 
-    assert.throws(
-      () => resolveRuntimePolicy({ cwd: "missing" }, null, { parentCwd: project }),
-      /Working directory does not exist/,
+    const corrupt = sessionFile();
+    writeFileSync(launchPolicyPath(corrupt), "not json {");
+    assert.deepEqual(readLaunchPolicy(corrupt), { kind: "corrupt" });
+
+    const wrongShape = sessionFile();
+    writeFileSync(
+      launchPolicyPath(wrongShape),
+      JSON.stringify({ version: 2, cwd: "/work", lifecycleMode: "chaotic" }),
     );
-    assert.throws(
-      () => resolveRuntimePolicy({ cwd: file }, null, { parentCwd: project }),
-      /Working directory is not a directory/,
-    );
-    assert.throws(
-      () =>
-        resolveRuntimePolicy({ model: "openai/missing" }, null, {
-          parentCwd: project,
-          isModelAvailable: () => false,
-        }),
-      /Model "openai\/missing" is not available/,
-    );
-    assert.throws(
-      () => resolveRuntimePolicy({ thinking: "extreme" as never }, null, { parentCwd: project }),
-      /Invalid thinking level "extreme"/,
-    );
-    assert.throws(
-      () => resolveRuntimePolicy({ tools: ["read", "bad tool"] }, null, { parentCwd: project }),
-      /Invalid tool name "bad tool"/,
-    );
-    assert.throws(
-      () =>
-        resolveRuntimePolicy({ allowNestedDelegation: "sometimes" as never }, null, {
-          parentCwd: project,
-        }),
-      /allowNestedDelegation must be a boolean/,
-    );
+    assert.deepEqual(readLaunchPolicy(wrongShape), { kind: "corrupt" });
+  });
+
+  it("maps lifecycle modes to and from the request flags", () => {
+    assert.equal(lifecycleModeOf({ interactive: true, autoExit: false }), "interactive");
+    assert.equal(lifecycleModeOf({ interactive: false, autoExit: true }), "autonomous");
+    assert.equal(lifecycleModeOf({ interactive: false, autoExit: false }), "manual");
+    assert.deepEqual(lifecycleFlags("manual"), { interactive: false, autoExit: false });
+    assert.deepEqual(lifecycleFlags("interactive"), { interactive: true, autoExit: false });
+    assert.deepEqual(lifecycleFlags("autonomous"), { interactive: false, autoExit: true });
   });
 });

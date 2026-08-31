@@ -22,16 +22,12 @@ import { createHerdrEventStream } from "./herdr/events.ts";
 import { readExitSidecar } from "./child-protocol.ts";
 import { contextUsagePath } from "./context-usage.ts";
 import { readDurableRecords, removeDurableRecord } from "./durable-state.ts";
-import {
-  buildLaunchPlan,
-  buildResumeLaunchPlan,
-  resolveResumeLaunchBehavior,
-} from "./launch.ts";
+import { buildLaunchPlan, buildResumeLaunchPlan, resolveResumeLifecycle } from "./launch.ts";
+import { launchPolicyPath, readLaunchPolicy } from "./launch-policy.ts";
 import { formatElapsed, renderSubagentPing, renderSubagentResult } from "./messages.ts";
 import { findLastAssistantMessage, getNewEntries } from "./session.ts";
 import { createSubagentRuntime, describeChildLaunchError } from "./runtime.ts";
 import { acquireResumeLock, releaseResumeLock } from "./resume-lock.ts";
-import { readPersistedLaunchPolicy } from "./resume-policy.ts";
 import { attachStatusWidget } from "./status-widget-controller.ts";
 import {
   InterruptParamsSchema,
@@ -491,6 +487,19 @@ async function executeSubagentResume(
     removeDurableRecord(durableStateDir, record.id);
   }
 
+  // Reapply the persisted launch policy; a corrupt policy file must refuse
+  // the resume rather than relaunch the child with degraded restrictions.
+  const policyRead = readLaunchPolicy(params.sessionPath);
+  if (policyRead.kind === "corrupt") {
+    releaseReservation();
+    return errorResult(
+      `Error: the persisted launch policy for this session is unreadable or invalid; ` +
+        `refusing to resume without its restrictions. Repair or delete ` +
+        `${launchPolicyPath(params.sessionPath)} to proceed.`,
+      "corrupt launch policy",
+    );
+  }
+
   let plan;
   try {
     plan = buildResumeLaunchPlan(params, {
@@ -499,7 +508,7 @@ async function executeSubagentResume(
       parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
       parentCwd: ctx.cwd,
       env: process.env,
-      resumePolicy: readPersistedLaunchPolicy(params.sessionPath),
+      resumePolicy: policyRead.kind === "ok" ? policyRead.policy : null,
     });
   } catch (error: any) {
     const message = error?.message ?? String(error);
@@ -865,7 +874,7 @@ export const __test__ = {
   isInsideHerdr,
   runningSubagents: subagentRuntime.running,
   resolveTarget: subagentRuntime.resolveTarget,
-  resolveResumeLaunchBehavior,
+  resolveResumeLifecycle,
   resolveResumeOutcome,
   recoverChildren,
   getDurableStateDir,

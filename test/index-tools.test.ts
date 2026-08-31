@@ -403,15 +403,17 @@ describe("index tools: subagent_interrupt", () => {
 // ── subagent_resume ─────────────────────────────────────────────────────────
 
 describe("index tools: subagent_resume", () => {
-  it("resolveResumeLaunchBehavior defaults to auto-exit, non-interactive", () => {
-    assert.deepEqual(__test__.resolveResumeLaunchBehavior({}), {
-      autoExit: true,
-      interactive: false,
-    });
-    assert.deepEqual(__test__.resolveResumeLaunchBehavior({ autoExit: false }), {
-      autoExit: false,
-      interactive: true,
-    });
+  it("resolveResumeLifecycle prefers override, then persisted mode, then autonomous", () => {
+    assert.equal(__test__.resolveResumeLifecycle({}, null), "autonomous");
+    assert.equal(__test__.resolveResumeLifecycle({ autoExit: false }, null), "interactive");
+    const manualPolicy = {
+      version: 2 as const,
+      cwd: "/tmp",
+      allowNestedDelegation: true,
+      lifecycleMode: "manual" as const,
+    };
+    assert.equal(__test__.resolveResumeLifecycle({}, manualPolicy), "manual");
+    assert.equal(__test__.resolveResumeLifecycle({ autoExit: true }, manualPolicy), "autonomous");
   });
 
   it("rejects a missing session file", async () => {
@@ -453,6 +455,25 @@ describe("index tools: subagent_resume", () => {
 
     assert.equal(result.details.error, "session active");
     assert.equal(existsSync(`${sessionPath}.exit`), true);
+  });
+
+  it("refuses to resume when the persisted launch policy is corrupt", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "corrupt-policy-child.jsonl");
+    writeChildSession(sessionPath, "prior output");
+    writeFileSync(`${sessionPath}.herdr-launch-policy.json`, "not json {");
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-corrupt",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.equal(result.details.error, "corrupt launch policy");
+    assert.match(result.content[0].text, /unreadable or invalid/);
   });
 
   it("clears stale sidecars, launches via argv, and extracts only NEW entries for the summary", async () => {

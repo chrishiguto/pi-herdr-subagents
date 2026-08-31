@@ -21,10 +21,19 @@ import {
   resolveLaunchBehavior,
 } from "./agents.ts";
 import { makeLiveAgentName } from "./herdr/client.ts";
+import {
+  launchPolicyPath,
+  lifecycleFlags,
+  lifecycleModeOf,
+  serializeLaunchPolicy,
+  THINKING_LEVELS,
+  type ChildThinkingLevel,
+  type LaunchPolicy,
+  type LifecycleMode,
+} from "./launch-policy.ts";
 import type { SubagentParams } from "./tool-contracts.ts";
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type ChildThinkingLevel = (typeof THINKING_LEVELS)[number];
+export { THINKING_LEVELS, type ChildThinkingLevel } from "./launch-policy.ts";
 
 export type WorkflowRef = NonNullable<SubagentParams["workflow"]>;
 
@@ -41,19 +50,6 @@ export function compileWorkflowPrompt(workflow: WorkflowRef, task: string): stri
 
 /** Public request type derived from the registered TypeBox schema. */
 export type SubagentLaunchParams = SubagentParams;
-
-export interface PersistedLaunchPolicy {
-  version: 1;
-  cwd: string;
-  model?: string;
-  thinking?: ChildThinkingLevel;
-  tools?: string[];
-  allowNestedDelegation: boolean;
-  denyTools?: string;
-  agent?: string;
-  interactive: boolean;
-  autoExit: boolean;
-}
 
 export interface LaunchPlanContext {
   /** Orchestrator session directory (ctx.sessionManager.getSessionDir()). */
@@ -76,7 +72,7 @@ export interface LaunchPlanContext {
   /** Override the child extension path (default: the package's single public entrypoint). */
   subagentDonePath?: string;
   /** Original effective policy, when planning a resume. */
-  resumePolicy?: PersistedLaunchPolicy | null;
+  resumePolicy?: LaunchPolicy | null;
 }
 
 export interface LaunchPlan {
@@ -453,9 +449,9 @@ export function buildLaunchPlan(
   childEnv.PI_SUBAGENT_SESSION = sessionFile;
   childEnv.PI_SUBAGENT_ID = id;
   files.push({
-    path: `${sessionFile}.herdr-launch-policy.json`,
-    content: `${JSON.stringify({
-      version: 1,
+    path: launchPolicyPath(sessionFile),
+    content: serializeLaunchPolicy({
+      version: 2,
       cwd: targetCwd,
       model: effectiveModel,
       thinking: effectiveThinking,
@@ -463,9 +459,8 @@ export function buildLaunchPlan(
       allowNestedDelegation: runtimePolicy.allowNestedDelegation,
       denyTools: childEnv.PI_DENY_TOOLS,
       agent: params.agent,
-      interactive,
-      autoExit,
-    } satisfies PersistedLaunchPolicy)}\n`,
+      lifecycleMode: lifecycleModeOf({ interactive, autoExit }),
+    }),
   });
 
   return {
@@ -504,16 +499,17 @@ export interface ResumeLaunchParams {
 }
 
 /**
- * Ported from pi-interactive-subagents: resumed sessions default to
- * autonomous follow-up work (auto-exit, non-interactive); explicit
- * autoExit: false yields an interactive resumed session.
+ * The resumed lifecycle. An explicit `autoExit` override applies to this run
+ * only (true → autonomous, false → interactive); otherwise the child's
+ * persisted lifecycle mode is reapplied. Sessions predating policy
+ * persistence default to autonomous follow-up work (ported behavior).
  */
-export function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): {
-  autoExit: boolean;
-  interactive: boolean;
-} {
-  const autoExit = params.autoExit ?? true;
-  return { autoExit, interactive: !autoExit };
+export function resolveResumeLifecycle(
+  params: { autoExit?: boolean },
+  policy: LaunchPolicy | null | undefined,
+): LifecycleMode {
+  if (params.autoExit !== undefined) return params.autoExit ? "autonomous" : "interactive";
+  return policy?.lifecycleMode ?? "autonomous";
 }
 
 export interface ResumeLaunchPlan {
@@ -557,9 +553,7 @@ export function buildResumeLaunchPlan(
   const id = ctx.id ?? Math.random().toString(16).slice(2, 10);
   const displayName = params.name ?? "Resume";
   const policy = ctx.resumePolicy;
-  const { autoExit, interactive } = resolveResumeLaunchBehavior({
-    autoExit: params.autoExit ?? policy?.autoExit,
-  });
+  const { autoExit, interactive } = lifecycleFlags(resolveResumeLifecycle(params, policy));
 
   const artifactDir = getArtifactDir(ctx.sessionDir, ctx.sessionId);
   const artifactTimestamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -579,12 +573,6 @@ export function buildResumeLaunchPlan(
   if (params.message) {
     resumeMessageFile = join(artifactDir, "subagent-resume", `${name}-${artifactTimestamp}.md`);
     files.push({ path: resumeMessageFile, content: params.message });
-  }
-  if (policy) {
-    files.push({
-      path: `${params.sessionPath}.herdr-launch-policy.json`,
-      content: `${JSON.stringify({ ...policy, interactive, autoExit })}\n`,
-    });
   }
   const initialPrompts = resumeMessageFile ? [`@${resumeMessageFile}`] : [];
   const piStartupArgv = [...piArgv];
