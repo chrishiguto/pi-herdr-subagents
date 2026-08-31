@@ -23,6 +23,14 @@ export type ExitSidecar =
       message: string;
     };
 
+/** Parse the PI_DENY_TOOLS list (set by the parent from launch policy). */
+export function parseDeniedTools(rawValue: string | undefined): string[] {
+  return (rawValue ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 /** Parse the child identity as one contract: both fields are absent, or both are valid. */
 export function parseChildIdentity(
   env: Record<string, string | undefined> = process.env,

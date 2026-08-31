@@ -12,7 +12,8 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import herdrSubagents, { __test__ } from "../extensions/herdr-subagents/index.ts";
+import herdrSubagents from "../extensions/herdr-subagents/index.ts";
+import { __test__ } from "../src/orchestrator.ts";
 import {
   DURABLE_STATE_VERSION,
   readDurableRecords,

@@ -9,20 +9,18 @@
  * the model gets a clear answer rather than a missing tool.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { existsSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import { getAgentConfigDir, loadAgentDefaults } from "./agents.ts";
+import { parseDeniedTools } from "./child-protocol.ts";
 import { createHerdrClient, type HerdrClient } from "./herdr/client.ts";
 import { probeHerdrReadiness } from "./herdr/compatibility.ts";
 import { createHerdrEventStream } from "./herdr/events.ts";
-import { contextUsagePath } from "./context-usage.ts";
-import { buildLaunchPlan, buildResumeLaunchPlan, resolveResumeLifecycle } from "./launch.ts";
-import { launchPolicyPath, readLaunchPolicy } from "./launch-policy.ts";
+import { getDurableStateDir } from "./durable-state.ts";
+import { buildLaunchPlan, resolveResumeLifecycle } from "./launch.ts";
 import { formatElapsed, renderSubagentPing, renderSubagentResult } from "./messages.ts";
-import { findLastAssistantMessage, getNewEntries } from "./session.ts";
+import { registerResumeTool, resolveResumeOutcome } from "./resume.ts";
 import {
   createSubagentRuntime,
   describeChildLaunchError,
@@ -30,23 +28,25 @@ import {
 } from "./runtime.ts";
 import { attachStatusWidget } from "./status-widget-controller.ts";
 import {
+  errorResult,
   InterruptParamsSchema,
   ListParamsSchema,
-  ResumeParamsSchema,
   SubagentParamsSchema,
   type InterruptParams,
   type InterruptToolDetails,
-  type ListedChildDetails,
   type ListToolDetails,
-  type ResumeParams,
-  type ResumeToolDetails,
   type SpawnToolDetails,
   type SubagentParams,
 } from "./tool-contracts.ts";
 import {
+  renderAckResult,
+  renderListResult,
+  renderSpawnCall,
+  renderToolTitle,
+} from "./tool-renderers.ts";
+import {
   watchSubagent,
   type RunningSubagent,
-  type SubagentOutcome,
   type WatcherDeps,
 } from "./watcher.ts";
 
@@ -209,17 +209,6 @@ function registerSetupHintStubs(pi: ExtensionAPI, shouldRegister: (name: string)
 
 // ── subagent spawn ──────────────────────────────────────────────────────────
 
-function errorResult(text: string, error: string) {
-  return {
-    content: [{ type: "text" as const, text }],
-    details: { error },
-  };
-}
-
-function getDurableStateDir(sessionDir: string, sessionId: string): string {
-  return join(sessionDir, "artifacts", sessionId, "herdr-subagents-state");
-}
-
 async function executeSubagentSpawn(
   pi: ExtensionAPI,
   params: SubagentParams,
@@ -347,243 +336,16 @@ function registerSubagentTool(pi: ExtensionAPI): void {
     },
 
     renderCall(args, theme) {
-      const partialArgs = args as Record<string, unknown>;
-      const name =
-        typeof partialArgs.name === "string" && partialArgs.name ? partialArgs.name : "(unnamed)";
-      const task = typeof partialArgs.task === "string" ? partialArgs.task : "";
-      const agent =
-        typeof partialArgs.agent === "string" && partialArgs.agent
-          ? theme.fg("dim", ` (${partialArgs.agent})`)
-          : "";
-      const cwdHint =
-        typeof partialArgs.cwd === "string" && partialArgs.cwd
-          ? theme.fg("dim", ` in ${partialArgs.cwd}`)
-          : "";
-      let text = "▸ " + theme.fg("toolTitle", theme.bold(name)) + agent + cwdHint;
-
-      // Show a one-line task preview. renderCall is called repeatedly as the
-      // LLM generates tool arguments, so args.task grows token by token.
-      if (task) {
-        const firstLine = task.split("\n").find((l: string) => l.trim()) ?? "";
-        const preview = firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
-        if (preview) {
-          text += "\n" + theme.fg("toolOutput", preview);
-        }
-        const totalLines = task.split("\n").length;
-        if (totalLines > 1) {
-          text += theme.fg("muted", ` (${totalLines} lines)`);
-        }
-      }
-
-      return new Text(text, 0, 0);
+      return renderSpawnCall(args, theme);
     },
 
     renderResult(result, _opts, theme) {
       const details = result.details as Partial<SpawnToolDetails>;
-      const name = details.name ?? "(unnamed)";
-
-      if (details.status === "started") {
-        return new Text(
-          theme.fg("accent", "▸") +
-            " " +
-            theme.fg("toolTitle", theme.bold(name)) +
-            theme.fg("dim", " — started"),
-          0,
-          0,
-        );
-      }
-
-      const first = result.content[0];
-      const text = first?.type === "text" ? first.text : "";
-      return new Text(theme.fg("dim", text), 0, 0);
-    },
-  });
-}
-
-// ── subagent_resume ─────────────────────────────────────────────────────────
-
-function safeGetNewEntries(sessionFile: string, afterLine: number) {
-  try {
-    return getNewEntries(sessionFile, afterLine);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Re-scope a resumed subagent's outcome summary to entries added AFTER the
- * resume launch (ported reference behavior): the pre-existing conversation
- * must not masquerade as new output. Launch failures and pings pass through
- * untouched — their payloads are already truthful.
- */
-function resolveResumeOutcome(
-  outcome: SubagentOutcome,
-  sessionPath: string,
-  entryCountBefore: number,
-): SubagentOutcome {
-  const newSummary = () =>
-    findLastAssistantMessage(safeGetNewEntries(sessionPath, entryCountBefore));
-
-  switch (outcome.kind) {
-    case "completed":
-      return { ...outcome, summary: newSummary() ?? "Resumed session exited without new output" };
-    case "unsignaled-exit":
-      return { ...outcome, summary: newSummary() };
-    default:
-      return outcome;
-  }
-}
-
-const RESUME_DESCRIPTION =
-  "Resume a previous sub-agent session in a new herdr pane. " +
-  "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-  "When the resumed sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
-  "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT poll for status. All of that is wasted work — the harness handles delivery for you. " +
-  "DO NOT fabricate or assume results. After resuming, either end your turn or work on other independent tasks; the harness will wake you when the result is ready. " +
-  "Use when a sub-agent was cancelled or needs follow-up work.";
-
-async function executeSubagentResume(
-  pi: ExtensionAPI,
-  params: ResumeParams,
-  ctx: {
-    cwd: string;
-    sessionManager: {
-      getSessionFile(): string | null;
-      getSessionId(): string;
-      getSessionDir(): string;
-    };
-  },
-) {
-  params = { ...params, sessionPath: resolve(ctx.cwd, params.sessionPath) };
-  if (!existsSync(params.sessionPath)) {
-    return errorResult(
-      `Error: session file not found: ${params.sessionPath}`,
-      "session not found",
-    );
-  }
-
-  // Reapply the persisted launch policy; a corrupt policy file must refuse
-  // the resume rather than relaunch the child with degraded restrictions.
-  const policyRead = readLaunchPolicy(params.sessionPath);
-  if (policyRead.kind === "corrupt") {
-    return errorResult(
-      `Error: the persisted launch policy for this session is unreadable or invalid; ` +
-        `refusing to resume without its restrictions. Repair or delete ` +
-        `${launchPolicyPath(params.sessionPath)} to proceed.`,
-      "corrupt launch policy",
-    );
-  }
-
-  let plan;
-  try {
-    plan = buildResumeLaunchPlan(params, {
-      sessionDir: ctx.sessionManager.getSessionDir(),
-      sessionId: ctx.sessionManager.getSessionId(),
-      parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
-      parentCwd: ctx.cwd,
-      env: process.env,
-      resumePolicy: policyRead.kind === "ok" ? policyRead.policy : null,
-    });
-  } catch (error: any) {
-    const message = error?.message ?? String(error);
-    return errorResult(`Failed to plan resume launch: ${message}`, message);
-  }
-
-  // Record entry count before resuming so we can extract only new messages.
-  const entryCountBefore = safeGetNewEntries(params.sessionPath, 0).length;
-  const durableStateDir = getDurableStateDir(
-    ctx.sessionManager.getSessionDir(),
-    ctx.sessionManager.getSessionId(),
-  );
-
-  const claim = await runtime().claimSessionForResume(
-    pi,
-    params.sessionPath,
-    durableStateDir,
-    plan,
-  );
-  if (!claim.ok) {
-    return errorResult(`Error: ${claim.message}`, claim.code);
-  }
-
-  let running: RunningSubagent;
-  try {
-    // Stale-sidecar cleanup happens only after both in-process and
-    // cross-process exclusivity have been established.
-    rmSync(`${params.sessionPath}.exit`, { force: true });
-    rmSync(contextUsagePath(params.sessionPath), { force: true });
-
-    running = await runtime().launch(
-      pi,
-      plan,
-      { name: plan.name, task: params.message ?? "resumed session" },
-      durableStateDir,
-      {
-        lockPath: claim.lockPath,
-        mapOutcome: (outcome) => resolveResumeOutcome(outcome, params.sessionPath, entryCountBefore),
-      },
-    );
-  } catch (error: any) {
-    const { message, code } = describeChildLaunchError(error);
-    return errorResult(
-      `Failed to launch Pi child for "${plan.name}": ${message}`,
-      code,
-    );
-  } finally {
-    claim.releaseReservation();
-  }
-  return {
-    content: [{ type: "text" as const, text: `Session "${plan.name}" resumed.` }],
-    details: {
-      id: running.id,
-      name: plan.name,
-      paneId: running.paneId,
-      sessionPath: params.sessionPath,
-      liveAgentName: running.liveAgentName,
-      status: "started",
-    },
-  };
-}
-
-function registerResumeTool(pi: ExtensionAPI): void {
-  pi.registerTool({
-    name: "subagent_resume",
-    label: "Resume Subagent",
-    description: RESUME_DESCRIPTION,
-    promptSnippet: "Resume a child session; its result is delivered automatically.",
-    parameters: ResumeParamsSchema,
-
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return executeSubagentResume(pi, params, ctx as any);
-    },
-
-    renderCall(args, theme) {
-      const name = (args as any).name ?? "Resume";
-      return new Text(
-        "▸ " + theme.fg("toolTitle", theme.bold(name)) + theme.fg("dim", " — resuming session"),
-        0,
-        0,
-      );
-    },
-
-    renderResult(result, _opts, theme) {
-      const details = result.details as Partial<ResumeToolDetails>;
-      const name = details.name ?? "Resume";
-
-      if (details.status === "started") {
-        return new Text(
-          theme.fg("accent", "▸") +
-            " " +
-            theme.fg("toolTitle", theme.bold(name)) +
-            theme.fg("dim", " — resumed"),
-          0,
-          0,
-        );
-      }
-
-      const first = result.content[0];
-      const text = first?.type === "text" ? first.text : "";
-      return new Text(theme.fg("dim", text), 0, 0);
+      return renderAckResult(result, theme, {
+        acknowledged: details.status === "started",
+        name: details.name ?? "(unnamed)",
+        suffix: "started",
+      });
     },
   });
 }
@@ -636,33 +398,17 @@ function registerInterruptTool(pi: ExtensionAPI): void {
     },
 
     renderCall(args, theme) {
-      const target = (args as any).id ? `${(args as any).id}` : ((args as any).name ?? "(unknown)");
-      return new Text(
-        theme.fg("accent", "▸") +
-          " " +
-          theme.fg("toolTitle", theme.bold(target)) +
-          theme.fg("dim", " — interrupt turn"),
-        0,
-        0,
-      );
+      const params = args as InterruptParams;
+      return renderToolTitle(theme, params.id ?? params.name ?? "(unknown)", "interrupt turn");
     },
 
     renderResult(result, _opts, theme) {
       const details = result.details as InterruptToolDetails;
-      if (details.status === "interrupt_requested") {
-        return new Text(
-          theme.fg("accent", "▸") +
-            " " +
-            theme.fg("toolTitle", theme.bold(details.name ?? details.id ?? "subagent")) +
-            theme.fg("dim", " — interrupt requested"),
-          0,
-          0,
-        );
-      }
-
-      const first = result.content[0];
-      const text = first?.type === "text" ? first.text : "";
-      return new Text(theme.fg("dim", text), 0, 0);
+      return renderAckResult(result, theme, {
+        acknowledged: details.status === "interrupt_requested",
+        name: details.name ?? details.id ?? "subagent",
+        suffix: "interrupt requested",
+      });
     },
   });
 }
@@ -705,19 +451,7 @@ function registerListTool(pi: ExtensionAPI): void {
 
     renderResult(result, _opts, theme) {
       const details = result.details as Partial<ListToolDetails>;
-      const children = details.children ?? [];
-      if (children.length === 0) {
-        return new Text(theme.fg("dim", "No active subagents."), 0, 0);
-      }
-      const lines = children.map(
-        (child: ListedChildDetails) =>
-          `  ${theme.fg("toolTitle", theme.bold(child.name))}` +
-          theme.fg(
-            "dim",
-            ` [${child.id}] — ${child.state} — ${formatElapsed(child.elapsedSeconds)} — ${child.sessionFile}`,
-          ),
-      );
-      return new Text(lines.join("\n"), 0, 0);
+      return renderListResult(details.children ?? [], theme);
     },
   });
 }
@@ -784,17 +518,12 @@ export function registerOrchestrator(pi: ExtensionAPI): void {
   const inHerdr = isInsideHerdr();
 
   // Tools denied via PI_DENY_TOOLS env var (set by parent agent based on frontmatter)
-  const deniedTools = new Set(
-    (process.env.PI_DENY_TOOLS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
+  const deniedTools = new Set(parseDeniedTools(process.env.PI_DENY_TOOLS));
   const shouldRegister = (name: string) => !deniedTools.has(name);
 
   if (inHerdr) {
     if (shouldRegister("subagent")) registerSubagentTool(pi);
-    if (shouldRegister("subagent_resume")) registerResumeTool(pi);
+    if (shouldRegister("subagent_resume")) registerResumeTool(pi, { runtime });
     if (shouldRegister("subagent_interrupt")) registerInterruptTool(pi);
     if (shouldRegister("subagents_list")) registerListTool(pi);
     if (shouldRegister("subagent")) registerCommands(pi);

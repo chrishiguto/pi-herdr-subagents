@@ -70,32 +70,32 @@ export interface LaunchPlanContext {
   now?: Date;
   id?: string;
   /** Override the child extension path (default: the package's single public entrypoint). */
-  subagentDonePath?: string;
+  childExtensionPath?: string;
   /** Original effective policy, when planning a resume. */
   resumePolicy?: LaunchPolicy | null;
 }
 
-export interface LaunchPlan {
+export interface SeedSession {
+  mode: "standalone" | "lineage-only" | "fork";
+  parentSessionFile: string;
+  parentLeafId?: string | null;
+  childSessionFile: string;
+  childCwd: string;
+}
+
+/**
+ * What the runtime needs to execute any child launch. Initial launches and
+ * resumes extend this with their own planning artifacts.
+ */
+export interface ChildLaunchPlanBase {
   id: string;
   name: string;
-  task: string;
-  agent?: string;
-  /** Effective working directory for the child (param > agent def > orchestrator cwd). */
-  effectiveCwd: string;
   /** Deterministic child session file path. */
   sessionFile: string;
-  taskArtifactFile: string | null;
-  syspromptFile: string | null;
   /** Files the executor must write (mkdir -p dirname first). */
   files: Array<{ path: string; content: string }>;
-  /** Session snapshot the executor must materialize before launch. */
-  seedSession: {
-    mode: "standalone" | "lineage-only" | "fork";
-    parentSessionFile: string;
-    parentLeafId?: string | null;
-    childSessionFile: string;
-    childCwd: string;
-  };
+  /** Session snapshot the executor must materialize before launch, if any. */
+  seedSession?: SeedSession;
   /**
    * Placement request for the child pane. The launcher owns the topology
    * decision (split direction or background tab) from the live Herdr layout;
@@ -117,8 +117,56 @@ export interface LaunchPlan {
   autoExit: boolean;
 }
 
+export interface LaunchPlan extends ChildLaunchPlanBase {
+  task: string;
+  agent?: string;
+  /** Effective working directory for the child (param > agent def > orchestrator cwd). */
+  effectiveCwd: string;
+  taskArtifactFile: string | null;
+  syspromptFile: string | null;
+  seedSession: SeedSession;
+}
+
 /** Absolute path to the package root (src/ → package). */
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** The package's single public extension entrypoint, loaded into every child. */
+export const CHILD_EXTENSION_ENTRYPOINT = join(
+  PACKAGE_ROOT,
+  "extensions",
+  "herdr-subagents",
+  "index.ts",
+);
+
+/** Curated child env exports (never a full env dump), shared by both planners. */
+function buildChildEnv(opts: {
+  env: Record<string, string | undefined>;
+  name: string;
+  agent?: string;
+  denyTools?: string;
+  interactive: boolean;
+  autoExit: boolean;
+  sessionFile: string;
+  id: string;
+}): Record<string, string> {
+  const childEnv: Record<string, string> = {};
+  if (opts.env.PATH) childEnv.PATH = opts.env.PATH;
+  // Children keep the user's global agent directory (never <cwd>/.pi/agent):
+  // Pi discovers project resources from <cwd>/.pi on its own, and pointing
+  // PI_CODING_AGENT_DIR at the project would isolate credentials and globally
+  // installed integrations such as Herdr's official Pi lifecycle reporter.
+  if (opts.env.PI_CODING_AGENT_DIR) {
+    childEnv.PI_CODING_AGENT_DIR = opts.env.PI_CODING_AGENT_DIR;
+  }
+  if (opts.denyTools) childEnv.PI_DENY_TOOLS = opts.denyTools;
+  childEnv.PI_SUBAGENT_NAME = opts.name;
+  if (opts.agent) childEnv.PI_SUBAGENT_AGENT = opts.agent;
+  if (opts.autoExit) childEnv.PI_SUBAGENT_AUTO_EXIT = "1";
+  if (opts.interactive) childEnv.PI_SUBAGENT_INTERACTIVE = "1";
+  childEnv.PI_SUBAGENT_SESSION = opts.sessionFile;
+  childEnv.PI_SUBAGENT_ID = opts.id;
+  return childEnv;
+}
 
 // ── runtime policy (validated params ?? agentDefs ?? defaults) ──────────────
 
@@ -370,9 +418,7 @@ export function buildLaunchPlan(
   // native arguments.
   const piArgv: string[] = ["--session", sessionFile];
 
-  const subagentDonePath = ctx.subagentDonePath ??
-    join(PACKAGE_ROOT, "extensions", "herdr-subagents", "index.ts");
-  piArgv.push("-e", subagentDonePath);
+  piArgv.push("-e", ctx.childExtensionPath ?? CHILD_EXTENSION_ENTRYPOINT);
 
   if (effectiveModel) {
     piArgv.push("--model", effectiveModel);
@@ -422,32 +468,18 @@ export function buildLaunchPlan(
   }
   const piStartupArgv = [...piArgv];
 
-  // ── Curated env exports (never a full env dump) ──
-  const childEnv: Record<string, string> = {};
-  if (env.PATH) childEnv.PATH = env.PATH;
-  // Children keep the user's global agent directory (never <cwd>/.pi/agent):
-  // Pi discovers project resources from <cwd>/.pi on its own, and pointing
-  // PI_CODING_AGENT_DIR at the project would isolate credentials and globally
-  // installed integrations such as Herdr's official Pi lifecycle reporter.
-  if (env.PI_CODING_AGENT_DIR) {
-    childEnv.PI_CODING_AGENT_DIR = env.PI_CODING_AGENT_DIR;
-  }
   const denySet = resolveDenyTools(agentDefs, runtimePolicy.allowNestedDelegation);
-  if (denySet.size > 0) {
-    childEnv.PI_DENY_TOOLS = [...denySet].join(",");
-  }
-  childEnv.PI_SUBAGENT_NAME = params.name;
-  if (params.agent) {
-    childEnv.PI_SUBAGENT_AGENT = params.agent;
-  }
-  if (autoExit) {
-    childEnv.PI_SUBAGENT_AUTO_EXIT = "1";
-  }
-  if (interactive) {
-    childEnv.PI_SUBAGENT_INTERACTIVE = "1";
-  }
-  childEnv.PI_SUBAGENT_SESSION = sessionFile;
-  childEnv.PI_SUBAGENT_ID = id;
+  const denyTools = denySet.size > 0 ? [...denySet].join(",") : undefined;
+  const childEnv = buildChildEnv({
+    env,
+    name: params.name,
+    agent: params.agent,
+    denyTools,
+    interactive,
+    autoExit,
+    sessionFile,
+    id,
+  });
   files.push({
     path: launchPolicyPath(sessionFile),
     content: serializeLaunchPolicy({
@@ -457,7 +489,7 @@ export function buildLaunchPlan(
       thinking: effectiveThinking,
       tools: effectiveTools,
       allowNestedDelegation: runtimePolicy.allowNestedDelegation,
-      denyTools: childEnv.PI_DENY_TOOLS,
+      denyTools,
       agent: params.agent,
       lifecycleMode: lifecycleModeOf({ interactive, autoExit }),
     }),
@@ -512,26 +544,9 @@ export function resolveResumeLifecycle(
   return policy?.lifecycleMode ?? "autonomous";
 }
 
-export interface ResumeLaunchPlan {
-  id: string;
-  name: string;
-  /** The existing child session file being resumed. */
-  sessionFile: string;
+export interface ResumeLaunchPlan extends ChildLaunchPlanBase {
+  /** The follow-up message artifact, when a message was provided. */
   resumeMessageFile: string | null;
-  /** Files the executor must write (mkdir -p dirname first). */
-  files: Array<{ path: string; content: string }>;
-  paneSplit: {
-    sourcePaneId: string;
-    cwd: string;
-    env: Record<string, string>;
-  };
-  agentStart: {
-    liveAgentName: string;
-    argv: string[];
-  };
-  initialPrompts: string[];
-  interactive: boolean;
-  autoExit: boolean;
 }
 
 /**
@@ -559,9 +574,12 @@ export function buildResumeLaunchPlan(
   const files: Array<{ path: string; content: string }> = [];
 
   // ── Pi argv ──
-  const subagentDonePath = ctx.subagentDonePath ??
-    join(PACKAGE_ROOT, "extensions", "herdr-subagents", "index.ts");
-  const piArgv: string[] = ["--session", params.sessionPath, "-e", subagentDonePath];
+  const piArgv: string[] = [
+    "--session",
+    params.sessionPath,
+    "-e",
+    ctx.childExtensionPath ?? CHILD_EXTENSION_ENTRYPOINT,
+  ];
   if (policy?.model) piArgv.push("--model", policy.model);
   if (policy?.thinking) piArgv.push("--thinking", policy.thinking);
   const toolAllowlist = buildSubagentToolAllowlist(policy?.tools);
@@ -575,23 +593,16 @@ export function buildResumeLaunchPlan(
   const initialPrompts = resumeMessageFile ? [`@${resumeMessageFile}`] : [];
   const piStartupArgv = [...piArgv];
 
-  // ── Curated env exports (never a full env dump) ──
-  const childEnv: Record<string, string> = {};
-  if (env.PATH) childEnv.PATH = env.PATH;
-  if (env.PI_CODING_AGENT_DIR) {
-    childEnv.PI_CODING_AGENT_DIR = env.PI_CODING_AGENT_DIR;
-  }
-  childEnv.PI_SUBAGENT_NAME = displayName;
-  if (policy?.agent) childEnv.PI_SUBAGENT_AGENT = policy.agent;
-  if (policy?.denyTools) childEnv.PI_DENY_TOOLS = policy.denyTools;
-  if (autoExit) {
-    childEnv.PI_SUBAGENT_AUTO_EXIT = "1";
-  }
-  if (interactive) {
-    childEnv.PI_SUBAGENT_INTERACTIVE = "1";
-  }
-  childEnv.PI_SUBAGENT_SESSION = params.sessionPath;
-  childEnv.PI_SUBAGENT_ID = id;
+  const childEnv = buildChildEnv({
+    env,
+    name: displayName,
+    agent: policy?.agent,
+    denyTools: policy?.denyTools,
+    interactive,
+    autoExit,
+    sessionFile: params.sessionPath,
+    id,
+  });
   return {
     id,
     name: displayName,

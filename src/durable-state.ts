@@ -19,11 +19,16 @@ import {
 import { join } from "node:path";
 
 import { hasMatchingActiveChildIdentity } from "./active-children.ts";
-import { readExitSidecar } from "./child-protocol.ts";
+import { exitSidecarPath, readExitSidecar } from "./child-protocol.ts";
 import { LIFECYCLE_MODES, type LifecycleMode } from "./launch-policy.ts";
 import type { AgentInfo } from "./herdr/client.ts";
 
 export const DURABLE_STATE_VERSION = 1 as const;
+
+/** Where a parent session keeps its per-child launch records. */
+export function getDurableStateDir(sessionDir: string, sessionId: string): string {
+  return join(sessionDir, "artifacts", sessionId, "herdr-subagents-state");
+}
 
 export interface DurableChildRecord {
   version: typeof DURABLE_STATE_VERSION;
@@ -184,6 +189,6 @@ export async function recoverDurableChildren(
  * cleanup redelivers the outcome on the next recovery pass.
  */
 export function finalizeReportedChild(dir: string, childId: string, sessionFile: string): void {
-  rmSync(`${sessionFile}.exit`, { force: true });
+  rmSync(exitSidecarPath(sessionFile), { force: true });
   removeDurableRecord(dir, childId);
 }

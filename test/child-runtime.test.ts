@@ -4,11 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import {
-  parseDeniedTools,
-  shouldAutoExitOnAgentEnd,
-} from "../src/child-runtime.ts";
-import { writeExitSidecar } from "../src/child-protocol.ts";
+import { shouldAutoExitOnAgentEnd } from "../src/child-runtime.ts";
+import { parseDeniedTools, writeExitSidecar } from "../src/child-protocol.ts";
 import { writeContextUsageSidecar } from "../src/context-usage.ts";
 import {
   createSubagentActivityTracker,

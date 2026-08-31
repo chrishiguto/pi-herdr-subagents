@@ -49,7 +49,7 @@ function fixture(): LaunchPlanContext {
     env: { PATH: "/usr/bin:/bin", PI_CODING_AGENT_DIR: agentDir, HERDR_PANE_ID: "w1:p1" },
     id: "abcd1234",
     now: new Date("2026-07-06T12:00:00.000Z"),
-    subagentDonePath: "/pkg/subagent-done.ts",
+    childExtensionPath: "/pkg/child-extension.ts",
   };
 }
 
@@ -61,7 +61,7 @@ describe("native launch planning", () => {
     assert.equal(plan.paneSplit.sourcePaneId, "w1:p1");
     assert.equal("direction" in plan.paneSplit, false);
     assert.equal(plan.agentStart.liveAgentName, "worker-abcd1234");
-    assert.deepEqual(plan.agentStart.argv.slice(0, 4), ["--session", plan.sessionFile, "-e", "/pkg/subagent-done.ts"]);
+    assert.deepEqual(plan.agentStart.argv.slice(0, 4), ["--session", plan.sessionFile, "-e", "/pkg/child-extension.ts"]);
     assert.equal(plan.initialPrompts.length, 1);
     assert.match(plan.initialPrompts[0], /^@/);
     assert.ok(!("launchScriptFile" in plan));

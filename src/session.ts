@@ -88,6 +88,15 @@ export function getNewEntries(sessionFile: string, afterLine: number): SessionEn
   return lines.slice(afterLine).map((line) => JSON.parse(line) as SessionEntry);
 }
 
+/** getNewEntries, but an unreadable/absent session file yields no entries. */
+export function getNewEntriesSafe(sessionFile: string, afterLine: number): SessionEntry[] {
+  try {
+    return getNewEntries(sessionFile, afterLine);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Find the last assistant message text in a list of entries.
  */

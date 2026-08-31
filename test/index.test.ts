@@ -5,7 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-import herdrSubagents, { __test__ } from "../extensions/herdr-subagents/index.ts";
+import herdrSubagents from "../extensions/herdr-subagents/index.ts";
+import { __test__ } from "../src/orchestrator.ts";
 import { createSubagentActivityTracker } from "../src/runtime-events.ts";
 import {
   DURABLE_STATE_VERSION,
@@ -870,8 +871,10 @@ describe("index: subagent tool", () => {
       createStream: () => makeFakeStream() as any,
     });
     await replacement.__test__.recoverChildren(fake.api, fx.ctx);
-    assert.equal(fake.sent.length, 1, "replacement generation must deliver");
-    assert.match(fake.sent[0].message.content, /Worker/);
+    // (deepEqual above narrowed fake.sent to never[]; widen for the content check)
+    const delivered = fake.sent as Array<{ message: { content: string } }>;
+    assert.equal(delivered.length, 1, "replacement generation must deliver");
+    assert.match(delivered[0].message.content, /Worker/);
     assert.deepEqual(readDurableRecords(stateDir), []);
     replacement.__test__.reset();
   });

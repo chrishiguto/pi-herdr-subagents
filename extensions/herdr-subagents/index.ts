@@ -5,8 +5,6 @@ import { registerChildRuntime } from "../../src/child-runtime.ts";
 import { registerHerdrAgentState } from "../../src/herdr/agent-state.ts";
 import { registerOrchestrator } from "../../src/orchestrator.ts";
 
-export { __test__, isInsideHerdr } from "../../src/orchestrator.ts";
-
 export default function herdrSubagents(pi: ExtensionAPI): void {
   registerHerdrAgentState(pi);
   registerChildRuntime(pi);

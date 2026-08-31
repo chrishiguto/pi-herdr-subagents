@@ -28,15 +28,15 @@ import {
 import type { AgentStartResult, HerdrClient } from "./herdr/client.ts";
 import { probeHerdrReadiness } from "./herdr/compatibility.ts";
 import { lifecycleFlags, lifecycleModeOf } from "./launch-policy.ts";
-import type { LaunchPlan, ResumeLaunchPlan } from "./launch.ts";
+import type { ChildLaunchPlanBase } from "./launch.ts";
 import { buildOutcomeMessage } from "./messages.ts";
+import { findLastAssistantMessage, getNewEntriesSafe, seedSubagentSessionFile } from "./session.ts";
 import { appendChildTranscriptMarker, publishSubagentActivity } from "./runtime-events.ts";
 import {
   acquireSessionLock,
   releaseSessionLock,
   type SessionLock,
 } from "./session-claim.ts";
-import { findLastAssistantMessage, getNewEntries, seedSubagentSessionFile } from "./session.ts";
 import { chooseChildPlacement } from "./topology.ts";
 import type {
   RunningSubagent,
@@ -69,7 +69,7 @@ export class ChildLaunchError extends Error {
 
 export async function launchNativePiChild(
   client: HerdrClient,
-  plan: LaunchPlan | ResumeLaunchPlan,
+  plan: ChildLaunchPlanBase,
   hooks: {
     afterPaneCreated?: (paneId: string) => void;
     afterAgentStarted?: (started: AgentStartResult) => void;
@@ -86,7 +86,7 @@ export async function launchNativePiChild(
       mkdirSync(dirname(file.path), { recursive: true });
       writeFileSync(file.path, file.content, "utf8");
     }
-    if ("seedSession" in plan && plan.seedSession) {
+    if (plan.seedSession) {
       seedSubagentSessionFile(plan.seedSession);
     }
   } catch (error) {
@@ -158,7 +158,7 @@ export interface TrackedChildIdentity {
 
 async function launchTrackedChild(
   client: HerdrClient,
-  plan: LaunchPlan | ResumeLaunchPlan,
+  plan: ChildLaunchPlanBase,
   identity: TrackedChildIdentity,
   durableStateDir: string,
   lockPath: string,
@@ -254,14 +254,6 @@ export type SessionClaimResult =
 export type RuntimeInterruptResult =
   | { ok: true; child: RunningSubagent }
   | { ok: false; reason: "missing" | "ambiguous" | "stale" | "transport"; message: string; child?: RunningSubagent };
-
-function safeGetNewEntries(sessionFile: string, afterLine: number) {
-  try {
-    return getNewEntries(sessionFile, afterLine);
-  } catch {
-    return [];
-  }
-}
 
 function runningFromDurableRecord(
   record: DurableChildRecord,
@@ -469,7 +461,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
 
   async function launch(
     pi: ExtensionAPI,
-    plan: LaunchPlan | ResumeLaunchPlan,
+    plan: ChildLaunchPlanBase,
     identity: TrackedChildIdentity,
     durableStateDir: string,
     opts: {
@@ -533,7 +525,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
       kind: "unsignaled-exit",
       reason: "agent-disappeared",
       summary: findLastAssistantMessage(
-        safeGetNewEntries(decision.record.sessionFile, 0),
+        getNewEntriesSafe(decision.record.sessionFile, 0),
       ),
       sessionFile: decision.record.sessionFile,
     };

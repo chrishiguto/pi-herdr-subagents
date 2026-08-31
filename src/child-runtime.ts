@@ -14,7 +14,7 @@
 import type { ContextUsage, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { parseChildIdentity, writeExitSidecar } from "./child-protocol.ts";
+import { parseChildIdentity, parseDeniedTools, writeExitSidecar } from "./child-protocol.ts";
 import { writeContextUsageSidecar } from "./context-usage.ts";
 import { createSubagentActivityTracker } from "./runtime-events.ts";
 
@@ -44,13 +44,6 @@ export function shouldAutoExitOnAgentEnd(messages: any[] | undefined): boolean {
   }
 
   return true;
-}
-
-export function parseDeniedTools(rawValue: string | undefined): string[] {
-  return (rawValue ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
 }
 
 export function registerChildRuntime(pi: ExtensionAPI): void {

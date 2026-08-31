@@ -99,6 +99,14 @@ export interface ErrorDetails {
   error: string;
 }
 
+/** The uniform failure shape every orchestrator tool resolves to. */
+export function errorResult(text: string, error: string) {
+  return {
+    content: [{ type: "text" as const, text }],
+    details: { error } satisfies ErrorDetails,
+  };
+}
+
 export interface SpawnToolDetails {
   id: string;
   name: string;

@@ -15,7 +15,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 
-import herdrSubagents, { __test__ } from "../extensions/herdr-subagents/index.ts";
+import herdrSubagents from "../extensions/herdr-subagents/index.ts";
+import { __test__ } from "../src/orchestrator.ts";
 import type { SubagentOutcome } from "../src/watcher.ts";
 
 const FACTORY_KEY = Symbol.for("pi-herdr-subagents/extension-harness-factory");
