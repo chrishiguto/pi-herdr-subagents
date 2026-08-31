@@ -112,6 +112,7 @@ describe("Pi extension runtime: generic subagent", () => {
     const starts: unknown[] = [];
     __test__.setDeps({
       client: {
+        async sessionSnapshot() { return { panes: [] }; },
         async paneLayout() {
           return { workspace_id: "w1", panes: [{ pane_id: "w1:p1", rect: { width: 160, height: 50 } }] };
         },
@@ -121,9 +122,16 @@ describe("Pi extension runtime: generic subagent", () => {
         async tabCreate() {
           return { pane_id: "w1:p3", terminal_id: "term-3", workspace_id: "w1", tab_id: "w1:t2" };
         },
-        async agentStart(params: unknown) {
+        async agentStart(params: any) {
           starts.push(params);
-          return { paneId: "w1:p2", terminalId: "term-2", workspaceId: "w1", tabId: "w1:t1" };
+          return {
+            name: params.liveAgentName,
+            kind: "pi" as const,
+            paneId: "w1:p2",
+            terminalId: "term-2",
+            workspaceId: "w1",
+            tabId: "w1:t1",
+          };
         },
         async agentPrompt() {},
         async agentGet() { return { name: "plain-task-abcd1234", kind: "pi", paneId: "w1:p2" }; },
@@ -183,6 +191,8 @@ describe("Pi extension runtime: generic subagent", () => {
     };
     const contextActions: ExtensionContextActions = {
       getModel: () => undefined,
+      getScopedModels: () => [],
+      isProjectTrusted: () => true,
       isIdle: () => true,
       getSignal: () => undefined,
       abort() {},

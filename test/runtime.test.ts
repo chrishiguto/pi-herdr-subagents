@@ -30,6 +30,7 @@ function plan(): ResumeLaunchPlan {
 
 function client(overrides: Partial<HerdrClient> = {}): HerdrClient {
   return {
+    async sessionSnapshot() { return { panes: [] }; },
     async ping() { return { ok: true, version: "0.8.2", protocol: 20 }; },
     async paneLayout() {
       return {

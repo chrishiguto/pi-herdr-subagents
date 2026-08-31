@@ -177,7 +177,10 @@ describe("session.ts", () => {
         childCwd: "/tmp/standalone-cwd",
       });
 
-      const entries = readFileSync(childFile, "utf8").trim().split("\n").map(JSON.parse);
+      const entries = readFileSync(childFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
       assert.equal(entries.length, 1);
       assert.deepEqual(
         { type: entries[0].type, version: entries[0].version, cwd: entries[0].cwd },
@@ -282,8 +285,10 @@ describe("session.ts", () => {
       assert.notEqual(header.id, SESSION_HEADER.id);
       assert.ok(header.timestamp);
       const currentPiSession = SessionManager.open(childFile, dir, "/tmp/header-cwd");
-      assert.equal(currentPiSession.getHeader().version, 3);
-      assert.equal(currentPiSession.getHeader().parentSession, parentFile);
+      const currentHeader = currentPiSession.getHeader();
+      assert.ok(currentHeader);
+      assert.equal(currentHeader.version, 3);
+      assert.equal(currentHeader.parentSession, parentFile);
     });
 
     it("keeps parent and child transcripts independent after launch in every mode", () => {

@@ -12,6 +12,7 @@ import {
   writeDurableRecord,
   type DurableChildRecord,
 } from "../src/durable-state.ts";
+import type { AgentInfo } from "../src/herdr/client.ts";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -39,13 +40,13 @@ function record(overrides: Partial<DurableChildRecord> = {}): DurableChildRecord
   };
 }
 
-function client(opts: { agent?: unknown | null; pane?: unknown | null } = {}) {
+function client(opts: { agent?: AgentInfo | null; pane?: unknown | null } = {}) {
   const agent = opts.agent === undefined
     ? { name: "worker-abcd1234", kind: "pi", paneId: "w1:p2" }
     : opts.agent;
   const pane = opts.pane === undefined ? { pane_id: "w1:p2" } : opts.pane;
   return {
-    async agentGet() { return agent; },
+    async agentGet(): Promise<AgentInfo | null> { return agent; },
     async paneGet() { return pane; },
   };
 }

@@ -73,8 +73,11 @@ describe("package", () => {
       }),
     );
     const paths = packed.files.map((file: { path: string }) => file.path);
+    assert.ok(paths.includes("LICENSE"));
     assert.ok(paths.includes("extensions/herdr-subagents/index.ts"));
-    assert.ok(paths.includes("subagent-done.ts"));
+    assert.ok(!paths.includes("subagent-done.ts"));
+    assert.ok(paths.includes("src/child-runtime.ts"));
+    assert.ok(paths.includes("src/child-protocol.ts"));
     assert.ok(paths.some((path: string) => path.startsWith("src/")));
     assert.ok(paths.every((path: string) => !path.startsWith("agents/")));
     assert.ok(paths.every((path: string) => !path.startsWith("test/")));

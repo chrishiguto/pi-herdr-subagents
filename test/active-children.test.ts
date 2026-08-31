@@ -8,11 +8,14 @@ function running(overrides: Partial<RunningSubagent> = {}): RunningSubagent {
   return {
     id: "a1",
     name: "Worker",
+    task: "do work",
     agent: "worker",
     liveAgentName: "worker-a1",
     paneId: "w1:p4",
     sessionFile: "/tmp/a1.jsonl",
     startTime: 1_000,
+    interactive: false,
+    autoExit: true,
     ...overrides,
   };
 }

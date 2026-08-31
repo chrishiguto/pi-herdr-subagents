@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["extensions/**/*.ts", "subagent-done.ts", "src/**/*.ts"]
+  "include": ["extensions/**/*.ts", "src/**/*.ts", "test/**/*.ts"]
 }
