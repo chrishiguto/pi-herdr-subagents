@@ -7,7 +7,7 @@ export const SUBAGENT_ACTIVITY_EVENT = "pi-herdr-subagents:activity";
  */
 export function appendChildTranscriptMarker(
   pi: { appendEntry(customType: string, data?: unknown): void },
-  state: "running" | "reported",
+  state: "running" | "reported" | "retained",
   child: { id: string; name: string; sessionFile: string },
   extra?: Record<string, unknown>,
 ): void {

@@ -27,6 +27,8 @@ const ENV_KEYS = [
   "HERDR_TAB_ID",
   "PI_DENY_TOOLS",
   "PI_SUBAGENT_AGENT",
+  "PI_SUBAGENT_SESSION",
+  "PI_SUBAGENT_ID",
   "PI_SUBAGENT_INTERACTIVE",
   "PI_HERDR_PI_BIN",
   "PI_CODING_AGENT_DIR",
@@ -70,6 +72,7 @@ function createFakePi(opts?: { allTools?: FakeToolInfo[]; slashCommands?: any[] 
   const handlers = new Map<string, Function[]>();
   const sent: Array<{ message: any; options: any }> = [];
   const sentUser: string[] = [];
+  const appended: Array<{ customType: string; data: unknown }> = [];
   const eventHandlers = new Map<string, Set<(data: unknown) => void>>();
   const events = {
     emit(channel: string, data: unknown) {
@@ -96,7 +99,9 @@ function createFakePi(opts?: { allTools?: FakeToolInfo[]; slashCommands?: any[] 
       renderers.set(type, renderer);
     },
     registerShortcut() {},
-    appendEntry() {},
+    appendEntry(customType: string, data: unknown) {
+      appended.push({ customType, data });
+    },
     on(event: string, handler: Function) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -127,6 +132,7 @@ function createFakePi(opts?: { allTools?: FakeToolInfo[]; slashCommands?: any[] 
     renderers,
     sent,
     sentUser,
+    appended,
     events,
     setAllTools(tools: FakeToolInfo[]) {
       allTools = tools;
@@ -297,6 +303,27 @@ describe("index: activation guard", () => {
     assert.ok(fake.toolNames().includes("subagents_list"));
   });
 
+  it("composes child control and nested orchestration tools through one entrypoint", () => {
+    envInsideHerdr();
+    process.env.PI_SUBAGENT_SESSION = "/tmp/child-session.jsonl";
+    process.env.PI_SUBAGENT_ID = "child-1";
+    const fake = createFakePi();
+    herdrSubagents(fake.api);
+
+    assert.ok(fake.toolNames().includes("caller_ping"));
+    assert.ok(fake.toolNames().includes("subagent_done"));
+    for (const name of ["subagent", "subagent_resume", "subagent_interrupt", "subagents_list"]) {
+      assert.ok(fake.toolNames().includes(name), `${name} should be available to a nested orchestrator`);
+    }
+  });
+
+  it("rejects an incomplete child handshake before semantic tools register", () => {
+    envInsideHerdr();
+    process.env.PI_SUBAGENT_SESSION = "/tmp/child-session.jsonl";
+    const fake = createFakePi();
+    assert.throws(() => herdrSubagents(fake.api), /PI_SUBAGENT_ID/);
+  });
+
   it("a nesting-denied child cannot register any delegation lifecycle tool", () => {
     envInsideHerdr();
     process.env.PI_DENY_TOOLS =
@@ -310,6 +337,7 @@ describe("index: activation guard", () => {
       ),
       [],
     );
+    assert.deepEqual(fake.commands, [], "delegation slash commands follow nesting denial");
   });
 
   it("inside herdr with unreachable socket → visible notify from session_start ping", async () => {
@@ -644,6 +672,63 @@ describe("index: subagent tool", () => {
     assert.deepEqual(lifecycle, []);
   });
 
+  it("delivers exactly once after the parent switches sessions", async () => {
+    const { fake, tool } = registerAndGetTool();
+    const previous = makeSpawnFixture();
+    const currentSessionDir = join(previous.root, "current-sessions");
+    mkdirSync(currentSessionDir, { recursive: true });
+    const currentSessionFile = join(currentSessionDir, "parent.jsonl");
+    writeFileSync(
+      currentSessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "current" })}\n`,
+    );
+    const { ctx: currentCtx } = makeFakeCtx({
+      cwd: previous.cwd,
+      sessionFile: currentSessionFile,
+      sessionDir: currentSessionDir,
+      sessionId: "current-session-id",
+    });
+    const stateDir = __test__.getDurableStateDir(currentSessionDir, "current-session-id");
+
+    __test__.setDeps({
+      client: makeFakeClient(),
+      watch: async (running): Promise<SubagentOutcome> => {
+        writeFileSync(
+          `${running.sessionFile}.exit`,
+          JSON.stringify({ version: 1, subagentId: running.id, type: "done" }),
+        );
+        return { kind: "completed", summary: "survived session switch", exitCode: 0 };
+      },
+      createStream: () => makeFakeStream() as any,
+    });
+
+    fake.fire("session_start", { reason: "startup" }, previous.ctx);
+    fake.fire("session_shutdown", {}, previous.ctx);
+    fake.fire("session_start", { reason: "new" }, currentCtx);
+
+    const result = await tool.execute(
+      "after-new",
+      { name: "Worker", task: "do it after /new" },
+      undefined,
+      undefined,
+      currentCtx,
+    );
+    await waitFor(() => fake.sent.length === 1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(fake.sent.length, 1);
+    assert.equal(
+      fake.appended.filter(
+        (entry) => entry.customType === "herdr-subagent" &&
+          (entry.data as any)?.state === "reported" &&
+          (entry.data as any)?.id === result.details.id,
+      ).length,
+      1,
+    );
+    assert.deepEqual(readDurableRecords(stateDir), []);
+    assert.equal(existsSync(`${result.details.sessionFile}.exit`), false);
+  });
+
   it("delivers the terminal steer before marking its durable record reported", async () => {
     const { fake, tool } = registerAndGetTool();
     const fx = makeSpawnFixture();
@@ -747,6 +832,34 @@ describe("index: subagent tool", () => {
 
     assert.deepEqual(fake.sent, []);
     assert.equal(readDurableRecords(stateDir).length, 1, "record must remain for recovery");
+    assert.equal(
+      fake.appended.filter((entry) => (entry.data as any)?.state === "retained").length,
+      1,
+      "obsolete delivery is observable in transcript history",
+    );
+  });
+
+  it("a duplicate load obsoletes only the previous source generation", async () => {
+    const { fake, tool } = registerAndGetTool();
+    const fx = makeSpawnFixture();
+    const stateDir = __test__.getDurableStateDir(fx.sessionDir, "orch-session-id");
+    let settle!: (outcome: SubagentOutcome) => void;
+    const pending = new Promise<SubagentOutcome>((resolve) => { settle = resolve; });
+    __test__.setDeps({
+      client: makeFakeClient(),
+      watch: async () => pending,
+      createStream: () => makeFakeStream() as any,
+    });
+
+    await tool.execute("duplicate-load", { name: "Worker", task: "do it" }, undefined, undefined, fx.ctx);
+    const replacement = await import(`../src/orchestrator.ts?reload=${Date.now()}`);
+    settle({ kind: "completed", summary: "old generation", exitCode: 0 });
+    await waitFor(() => __test__.runningSubagents.size === 0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(fake.sent, []);
+    assert.equal(readDurableRecords(stateDir).length, 1);
+    replacement.__test__.reset();
   });
 
   it("keeps the durable record recoverable when the lifecycle observer fails", async () => {

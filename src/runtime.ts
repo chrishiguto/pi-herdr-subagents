@@ -27,6 +27,7 @@ import { probeHerdrReadiness } from "./herdr/compatibility.ts";
 import type { LaunchPlan, ResumeLaunchPlan } from "./launch.ts";
 import { buildOutcomeMessage } from "./messages.ts";
 import { appendChildTranscriptMarker, publishSubagentActivity } from "./runtime-events.ts";
+import { releaseResumeLock } from "./resume-lock.ts";
 import { findLastAssistantMessage, getNewEntries, seedSubagentSessionFile } from "./session.ts";
 import { chooseChildPlacement } from "./topology.ts";
 import type {
@@ -169,6 +170,9 @@ async function launchTrackedChild(
             : plan.autoExit
               ? "autonomous"
               : "manual",
+          ...("resumeLockPath" in plan && plan.resumeLockPath
+            ? { resumeLockPath: plan.resumeLockPath }
+            : {}),
           createdAt: new Date().toISOString(),
         };
         writeDurableRecord(durableStateDir, record);
@@ -196,6 +200,9 @@ async function launchTrackedChild(
       durableStateDir,
       interactive: plan.interactive,
       autoExit: plan.autoExit,
+      ...("resumeLockPath" in plan && plan.resumeLockPath
+        ? { resumeLockPath: plan.resumeLockPath }
+        : {}),
     };
   } catch (error) {
     // If the launcher confirmed pane cleanup there is nothing left to recover;
@@ -256,11 +263,13 @@ function runningFromDurableRecord(
     durableStateDir,
     interactive: record.lifecycleMode === "interactive",
     autoExit: record.lifecycleMode === "autonomous",
+    resumeLockPath: record.resumeLockPath,
   };
 }
 
 export function createSubagentRuntime(options: SubagentRuntimeOptions) {
   const running = new Map<string, RunningSubagent>();
+  const reservedSessions = new Set<string>();
   let eventBus: ExtensionAPI["events"] | undefined;
   let reconcilePanes: Promise<Awaited<ReturnType<HerdrClient["paneList"]>>> | null = null;
 
@@ -337,15 +346,16 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
   function arm(
     pi: ExtensionAPI,
     child: RunningSubagent,
+    generationSignal: AbortSignal,
     mapOutcome?: (outcome: SubagentOutcome) => SubagentOutcome,
   ): void {
     eventBus = pi.events;
     const watcherAbort = new AbortController();
     child.abortController = watcherAbort;
 
-    const moduleSignal = options.getModuleSignal();
-    const onModuleAbort = () => watcherAbort.abort();
-    moduleSignal.addEventListener("abort", onModuleAbort, { once: true });
+    const onGenerationAbort = () => watcherAbort.abort();
+    generationSignal.addEventListener("abort", onGenerationAbort, { once: true });
+    if (generationSignal.aborted) watcherAbort.abort();
 
     running.set(child.id, child);
     publish(child, true);
@@ -358,8 +368,10 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
         signal: watcherAbort.signal,
       })
       .then((outcome) => {
-        running.delete(child.id);
-        publish(child, false);
+        if (running.get(child.id) === child) {
+          running.delete(child.id);
+          publish(child, false);
+        }
         // Cancelled means module abort/reload: keep the durable record so the
         // next runtime generation can recover the child.
         if (outcome.kind === "cancelled") return;
@@ -376,10 +388,20 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
 
         // Preserve the launch acknowledgement before a very fast terminal steer.
         setImmediate(() => {
-          if (moduleSignal.aborted) return;
+          if (generationSignal.aborted) {
+            appendChildTranscriptMarker(pi, "retained", child, {
+              outcome: outcome.kind,
+              reason: "generation-replaced-before-delivery",
+            });
+            return;
+          }
           try {
             pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
           } catch {
+            appendChildTranscriptMarker(pi, "retained", child, {
+              outcome: outcome.kind,
+              reason: "delivery-failed",
+            });
             // The durable record remains; the next recovery pass redelivers.
             return;
           }
@@ -388,14 +410,17 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
           if (!child.durableStateDir) return;
           try {
             finalizeReportedChild(child.durableStateDir, child.id, child.sessionFile);
+            releaseResumeLock(child.resumeLockPath);
           } catch {
             // At-least-once: a leftover record just redelivers on the next pass.
           }
         });
       })
       .catch((error: unknown) => {
-        running.delete(child.id);
-        publish(child, false);
+        if (running.get(child.id) === child) {
+          running.delete(child.id);
+          publish(child, false);
+        }
         try {
           const detail = error instanceof Error ? error.message : String(error);
           pi.sendMessage(
@@ -412,7 +437,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
         }
       })
       .finally(() => {
-        moduleSignal.removeEventListener("abort", onModuleAbort);
+        generationSignal.removeEventListener("abort", onGenerationAbort);
       });
   }
 
@@ -423,17 +448,19 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
     durableStateDir: string,
     mapOutcome?: (outcome: SubagentOutcome) => SubagentOutcome,
   ): Promise<RunningSubagent> {
+    const generationSignal = options.getModuleSignal();
     const child = await launchTrackedChild(options.getClient(), plan, identity, durableStateDir);
     appendChildTranscriptMarker(pi, "running", child, {
       paneId: child.paneId,
       terminalId: child.terminalId,
       liveAgentName: child.liveAgentName,
     });
-    arm(pi, child, mapOutcome);
+    arm(pi, child, generationSignal, mapOutcome);
     return child;
   }
 
   async function recover(pi: ExtensionAPI, durableStateDir: string): Promise<void> {
+    const generationSignal = options.getModuleSignal();
     eventBus = pi.events;
     const client = options.getClient();
     const decisions = await recoverDurableChildren(durableStateDir, client);
@@ -441,7 +468,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
     for (const decision of decisions) {
       const child = runningFromDurableRecord(decision.record, durableStateDir);
       if (decision.kind === "reattach") {
-        arm(pi, child);
+        arm(pi, child, generationSignal);
         continue;
       }
 
@@ -469,6 +496,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
       }
       try {
         finalizeReportedChild(durableStateDir, decision.record.id, decision.record.sessionFile);
+        releaseResumeLock(decision.record.resumeLockPath);
       } catch {
         // At-least-once: a leftover record just redelivers on the next pass.
       }
@@ -535,6 +563,17 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
     }
   }
 
+  function reserveSession(sessionFile: string): (() => void) | null {
+    if (
+      reservedSessions.has(sessionFile) ||
+      [...running.values()].some((child) => child.sessionFile === sessionFile)
+    ) {
+      return null;
+    }
+    reservedSessions.add(sessionFile);
+    return () => reservedSessions.delete(sessionFile);
+  }
+
   function shutdown(): void {
     for (const child of running.values()) {
       child.abortController?.abort();
@@ -543,7 +582,16 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
     running.clear();
   }
 
-  return { running, launch, recover, inspect, resolveTarget, interrupt, shutdown };
+  return {
+    running,
+    launch,
+    recover,
+    inspect,
+    resolveTarget,
+    interrupt,
+    reserveSession,
+    shutdown,
+  };
 }
 
 export type SubagentRuntime = ReturnType<typeof createSubagentRuntime>;
