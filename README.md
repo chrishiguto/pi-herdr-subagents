@@ -1,14 +1,14 @@
 # pi-herdr-subagents
 
-subagents for [pi](https://github.com/earendil-works/pi), each in a real [herdr](https://herdr.dev) pane. launch work, keep moving, and receive the result when the child finishes — no polling, screen scraping, or shell-readiness guesses.
+subagents for [pi](https://github.com/earendil-works/pi), each in a real [herdr](https://herdr.dev) pane. launch work, keep moving, and receive the result when the child finishes. no polling, screen scraping, or shell-readiness guesses.
 
 ## why this exists
 
-[pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) introduced the workflow: visible child panes, an unblocked parent, and asynchronous results. this package implements that workflow directly on herdr.
+[pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) introduced visible child panes that leave the parent free and return results asynchronously. this package brings that workflow to herdr.
 
-i wrote it instead of using an existing implementation because i did not want subagents hardcoded in markdown files. here, a subagent is a runtime task with an optional user-owned definition, which gives the workflow more flexibility and a different mental model.
+i wrote it because i did not want subagents hardcoded in markdown files. here, a subagent is a runtime task with an optional user-owned definition.
 
-the boundary is small: pi owns the conversation, this extension owns orchestration, and herdr owns panes and process lifecycle. herdr creates panes, waits for their shells, tracks agent identity, and reports process events, so the extension never types terminal commands or infers state from screen contents.
+pi owns the conversation, this extension handles orchestration, and herdr manages panes and process lifecycle. herdr creates panes, waits for their shells, tracks agent identity, and reports process events. the extension never types terminal commands or guesses state from screen contents.
 
 the package supports only pi children in herdr. for tmux, cmux, zellij, wezterm, or other child processes, use pi-interactive-subagents.
 
@@ -107,4 +107,4 @@ the integration harness uses isolated tmux and herdr sessions and will not touch
 
 this project descends from [pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) by [HazAT](https://github.com/HazAT). its visible-pane model, agent definitions, steer formats, and parts of the child handshake shaped this package.
 
-MIT. `src/herdr/agent-state.ts` is an attributed internal port of herdr's generated pi integration (`HERDR_INTEGRATION_VERSION=8`). parts of agent parsing, steer formatting, and `src/child-runtime.ts` derive from pi-interactive-subagents (MIT, HazAT). the herdr cli envelope pattern derives from [pi-herdr](https://github.com/ogulcancelik/pi-extensions) (MIT).
+`src/herdr/agent-state.ts` is an attributed internal port of herdr's generated pi integration (`HERDR_INTEGRATION_VERSION=8`). parts of agent parsing, steer formatting, and `src/child-runtime.ts` derive from pi-interactive-subagents by HazAT. the herdr cli envelope pattern derives from [pi-herdr](https://github.com/ogulcancelik/pi-extensions).
