@@ -59,24 +59,26 @@ no agent definition is required:
 use subagent with name "tests" and task "add regression tests for the parser"
 ```
 
-a skill or prompt template can start the child's workflow:
+a skill or prompt template can start the child's workflow. expansion happens in the child so its cwd, trust state, and resource catalog are authoritative; an unknown workflow fails visibly in that child:
 
 ```json
 {"name":"implement auth","task":"implement issue 42","workflow":{"kind":"skill","name":"implement"}}
 ```
 
-`contextMode` selects inherited conversation state: `lineage-only` keeps ancestry without copying turns, `standalone` starts clean, and `fork` copies the parent's active branch. a child may also set its working directory, model, thinking level, tools, skills, environment, and nested-delegation policy.
+`contextMode` selects inherited conversation state: `lineage-only` keeps ancestry without copying turns, `standalone` starts clean, and `fork` copies the parent's active branch. a child may also set its working directory, model, thinking level, tools, skills, environment, and nested-delegation policy. `interactive` explicitly selects a long-running user-driven child; generic children otherwise default to autonomous.
 
 agent definitions remain under project `.pi/agents/` or global `~/.pi/agent/agents/`. the package supplies orchestration, not role definitions.
 
 ## lifecycle
 
-children report one of two signals:
+children report one of two semantic signals:
 
-- `subagent_done` returns the completed result
+- a clean settled autonomous run, or explicit `subagent_done`, returns the completed result
 - `caller_ping` returns a question and resumable session path
 
-if a child exits before either signal, its state remains `unsignaled`; an exit is never treated as success. unfinished launches survive extension reloads and reconcile against their exact herdr agent and pane.
+if a child exits before either signal, its state remains `unsignaled`; an exit is never treated as success. unfinished launches survive extension reloads and reconcile against their exact herdr agent and pane. session changes (`/new`, `/resume`, `/fork`, and `/reload`) replace only their own runtime generation, so later children still deliver.
+
+resume reserves and locks the session before clearing old sidecars. it rejects active or pending correlated runs and reapplies the original cwd, model, thinking, tools, nesting, and lifecycle policy when that policy is available.
 
 while children run, the pi widget shows `working`, `idle`, or `blocked — needs input`. herdr's sidebar shows process state.
 
@@ -105,4 +107,4 @@ the integration harness uses isolated tmux and herdr sessions and will not touch
 
 this project descends from [pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) by [HazAT](https://github.com/HazAT). its visible-pane model, agent definitions, steer formats, and parts of the child handshake shaped this package.
 
-MIT. `src/herdr/agent-state.ts` is an attributed internal port of herdr's generated pi integration (`HERDR_INTEGRATION_VERSION=8`). parts of agent parsing, steer formatting, and `subagent-done.ts` derive from pi-interactive-subagents (MIT, HazAT). the herdr cli envelope pattern derives from [pi-herdr](https://github.com/ogulcancelik/pi-extensions) (MIT).
+MIT. `src/herdr/agent-state.ts` is an attributed internal port of herdr's generated pi integration (`HERDR_INTEGRATION_VERSION=8`). parts of agent parsing, steer formatting, and `src/child-runtime.ts` derive from pi-interactive-subagents (MIT, HazAT). the herdr cli envelope pattern derives from [pi-herdr](https://github.com/ogulcancelik/pi-extensions) (MIT).
