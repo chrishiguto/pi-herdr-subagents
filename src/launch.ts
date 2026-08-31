@@ -532,8 +532,6 @@ export interface ResumeLaunchPlan {
   initialPrompts: string[];
   interactive: boolean;
   autoExit: boolean;
-  /** Cross-process exclusivity claim held for the resumed session lifecycle. */
-  resumeLockPath?: string;
 }
 
 /**

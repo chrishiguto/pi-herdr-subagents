@@ -15,12 +15,15 @@ import {
 } from "./active-children.ts";
 import { consumeContextUsageSidecar } from "./context-usage.ts";
 import {
+  classifyDurableRecord,
   DURABLE_STATE_VERSION,
   finalizeReportedChild,
+  readDurableRecords,
   recoverDurableChildren,
   removeDurableRecord,
   writeDurableRecord,
   type DurableChildRecord,
+  type RecoveryDecision,
 } from "./durable-state.ts";
 import type { AgentStartResult, HerdrClient } from "./herdr/client.ts";
 import { probeHerdrReadiness } from "./herdr/compatibility.ts";
@@ -28,7 +31,11 @@ import { lifecycleFlags, lifecycleModeOf } from "./launch-policy.ts";
 import type { LaunchPlan, ResumeLaunchPlan } from "./launch.ts";
 import { buildOutcomeMessage } from "./messages.ts";
 import { appendChildTranscriptMarker, publishSubagentActivity } from "./runtime-events.ts";
-import { releaseResumeLock } from "./resume-lock.ts";
+import {
+  acquireSessionLock,
+  releaseSessionLock,
+  type SessionLock,
+} from "./session-claim.ts";
 import { findLastAssistantMessage, getNewEntries, seedSubagentSessionFile } from "./session.ts";
 import { chooseChildPlacement } from "./topology.ts";
 import type {
@@ -154,6 +161,7 @@ async function launchTrackedChild(
   plan: LaunchPlan | ResumeLaunchPlan,
   identity: TrackedChildIdentity,
   durableStateDir: string,
+  lockPath: string,
 ): Promise<RunningSubagent> {
   let record: DurableChildRecord | null = null;
   try {
@@ -167,9 +175,7 @@ async function launchTrackedChild(
           liveAgentName: plan.agentStart.liveAgentName,
           sessionFile: plan.sessionFile,
           lifecycleMode: lifecycleModeOf(plan),
-          ...("resumeLockPath" in plan && plan.resumeLockPath
-            ? { resumeLockPath: plan.resumeLockPath }
-            : {}),
+          resumeLockPath: lockPath,
           createdAt: new Date().toISOString(),
         };
         writeDurableRecord(durableStateDir, record);
@@ -197,15 +203,19 @@ async function launchTrackedChild(
       durableStateDir,
       interactive: plan.interactive,
       autoExit: plan.autoExit,
-      ...("resumeLockPath" in plan && plan.resumeLockPath
-        ? { resumeLockPath: plan.resumeLockPath }
-        : {}),
+      resumeLockPath: lockPath,
     };
   } catch (error) {
-    // If the launcher confirmed pane cleanup there is nothing left to recover;
-    // otherwise the record stays so the next recovery pass can find the child.
-    if (record && error instanceof ChildLaunchError && error.cleanupConfirmed === true) {
-      removeDurableRecord(durableStateDir, plan.id);
+    // If the launcher confirmed pane cleanup there is nothing left to recover:
+    // drop the record and the session lock together. Otherwise both stay so
+    // the next recovery pass can find the possibly-live child — a session
+    // whose child may still be running must remain claimed.
+    const recoverable =
+      record !== null &&
+      !(error instanceof ChildLaunchError && error.cleanupConfirmed === true);
+    if (!recoverable) {
+      if (record) removeDurableRecord(durableStateDir, plan.id);
+      releaseSessionLock(lockPath);
     }
     throw error;
   }
@@ -230,6 +240,10 @@ export interface SubagentRuntimeOptions {
   /** Tags this module generation's activity events (see runtime-events.ts). */
   runtimeOwner: string;
 }
+
+export type SessionClaimResult =
+  | { ok: true; lockPath: string; releaseReservation(): void }
+  | { ok: false; code: string; message: string };
 
 export type RuntimeInterruptResult =
   | { ok: true; child: RunningSubagent }
@@ -406,7 +420,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
           if (!child.durableStateDir) return;
           try {
             finalizeReportedChild(child.durableStateDir, child.id, child.sessionFile);
-            releaseResumeLock(child.resumeLockPath);
+            releaseSessionLock(child.resumeLockPath);
           } catch {
             // At-least-once: a leftover record just redelivers on the next pass.
           }
@@ -437,65 +451,192 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
       });
   }
 
+  /** Probe agent liveness, failing CLOSED: transport errors propagate. */
+  async function isAgentActiveStrict(liveAgentName: string): Promise<boolean> {
+    return (await options.getClient().agentGet(liveAgentName)) !== null;
+  }
+
+  function sessionLockFor(plan: { id: string; agentStart: { liveAgentName: string } }): SessionLock {
+    return {
+      version: 1,
+      id: plan.id,
+      liveAgentName: plan.agentStart.liveAgentName,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
   async function launch(
     pi: ExtensionAPI,
     plan: LaunchPlan | ResumeLaunchPlan,
     identity: TrackedChildIdentity,
     durableStateDir: string,
-    mapOutcome?: (outcome: SubagentOutcome) => SubagentOutcome,
+    opts: {
+      /** A session lock already claimed by the caller (resume). */
+      lockPath?: string;
+      mapOutcome?: (outcome: SubagentOutcome) => SubagentOutcome;
+    } = {},
   ): Promise<RunningSubagent> {
     const generationSignal = options.getModuleSignal();
-    const child = await launchTrackedChild(options.getClient(), plan, identity, durableStateDir);
+
+    // Initial launches claim the session too, so a live child denies resumes
+    // from any Pi process for its whole lifecycle.
+    let lockPath = opts.lockPath;
+    if (!lockPath) {
+      mkdirSync(dirname(plan.sessionFile), { recursive: true });
+      const acquired = await acquireSessionLock(
+        plan.sessionFile,
+        sessionLockFor(plan),
+        isAgentActiveStrict,
+      ).catch(() => null);
+      if (!acquired) {
+        throw new ChildLaunchError("materialize", "Failed to claim the child session file.", {
+          code: "session locked",
+        });
+      }
+      lockPath = acquired;
+    }
+
+    const child = await launchTrackedChild(
+      options.getClient(),
+      plan,
+      identity,
+      durableStateDir,
+      lockPath,
+    );
     appendChildTranscriptMarker(pi, "running", child, {
       paneId: child.paneId,
       terminalId: child.terminalId,
       liveAgentName: child.liveAgentName,
     });
-    arm(pi, child, generationSignal, mapOutcome);
+    arm(pi, child, generationSignal, opts.mapOutcome);
     return child;
+  }
+
+  /**
+   * Deliver a gone child's honest unsignaled-exit steer, then finalize its
+   * durable record and lock. Returns false (record untouched) when delivery
+   * failed — at-least-once means the record must survive to redeliver.
+   */
+  function deliverGoneChild(
+    pi: ExtensionAPI,
+    decision: Extract<RecoveryDecision, { kind: "gone" }>,
+    durableStateDir: string,
+  ): boolean {
+    const child = runningFromDurableRecord(decision.record, durableStateDir);
+
+    // The agent is gone; a leftover shell pane observes nothing — close it.
+    if (decision.closePane) {
+      options.getClient().paneClose(decision.record.paneId).catch(() => {});
+    }
+
+    const outcome: SubagentOutcome = {
+      kind: "unsignaled-exit",
+      reason: "agent-disappeared",
+      summary: findLastAssistantMessage(
+        safeGetNewEntries(decision.record.sessionFile, 0),
+      ),
+      sessionFile: decision.record.sessionFile,
+    };
+
+    const message = buildOutcomeMessage(child, outcome);
+    if (!message) return true;
+    try {
+      pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
+    } catch {
+      // The durable record remains; the next recovery pass redelivers.
+      return false;
+    }
+    try {
+      finalizeReportedChild(durableStateDir, decision.record.id, decision.record.sessionFile);
+      releaseSessionLock(decision.record.resumeLockPath);
+    } catch {
+      // At-least-once: a leftover record just redelivers on the next pass.
+    }
+    return true;
   }
 
   async function recover(pi: ExtensionAPI, durableStateDir: string): Promise<void> {
     const generationSignal = options.getModuleSignal();
     eventBus = pi.events;
-    const client = options.getClient();
-    const decisions = await recoverDurableChildren(durableStateDir, client);
+    const decisions = await recoverDurableChildren(durableStateDir, options.getClient());
 
     for (const decision of decisions) {
-      const child = runningFromDurableRecord(decision.record, durableStateDir);
       if (decision.kind === "reattach") {
-        arm(pi, child, generationSignal);
+        arm(pi, runningFromDurableRecord(decision.record, durableStateDir), generationSignal);
         continue;
       }
+      deliverGoneChild(pi, decision, durableStateDir);
+    }
+  }
 
-      // The agent is gone; a leftover shell pane observes nothing — close it.
-      if (decision.closePane) {
-        client.paneClose(decision.record.paneId).catch(() => {});
-      }
-
-      const outcome: SubagentOutcome = {
-        kind: "unsignaled-exit",
-        reason: "agent-disappeared",
-        summary: findLastAssistantMessage(
-          safeGetNewEntries(decision.record.sessionFile, 0),
-        ),
-        sessionFile: decision.record.sessionFile,
+  /**
+   * Establish resume exclusivity: in-process reservation, matching durable
+   * records classified (active or undelivered ones refuse; gone ones are
+   * honestly reported first), then the cross-process session lock. All
+   * liveness probes fail closed. On refusal the reservation is already
+   * released; on success the caller must releaseReservation() when the
+   * launch attempt ends.
+   */
+  async function claimSessionForResume(
+    pi: ExtensionAPI,
+    sessionPath: string,
+    durableStateDir: string,
+    plan: { id: string; agentStart: { liveAgentName: string } },
+  ): Promise<SessionClaimResult> {
+    const releaseReservation = reserveSession(sessionPath);
+    if (!releaseReservation) {
+      return {
+        ok: false,
+        code: "session active",
+        message: `session is already active: ${sessionPath}`,
       };
+    }
+    const refuse = (code: string, message: string) => {
+      releaseReservation();
+      return { ok: false as const, code, message };
+    };
 
-      const message = buildOutcomeMessage(child, outcome);
-      if (!message) continue;
-      try {
-        pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
-      } catch {
-        // The durable record remains; the next recovery pass redelivers.
-        continue;
+    try {
+      const matching = readDurableRecords(durableStateDir).filter(
+        (record) => record.sessionFile === sessionPath,
+      );
+      for (const record of matching) {
+        const decision = await classifyDurableRecord(record, options.getClient());
+        if (decision.kind === "reattach") {
+          return decision.via === "sidecar"
+            ? refuse(
+                "undelivered result",
+                `session has an undelivered result: ${sessionPath}`,
+              )
+            : refuse("child active", `session has an active child: ${sessionPath}`);
+        }
+        if (!deliverGoneChild(pi, decision, durableStateDir)) {
+          return refuse(
+            "undelivered result",
+            `could not deliver the pending result for ${sessionPath}; try again`,
+          );
+        }
       }
-      try {
-        finalizeReportedChild(durableStateDir, decision.record.id, decision.record.sessionFile);
-        releaseResumeLock(decision.record.resumeLockPath);
-      } catch {
-        // At-least-once: a leftover record just redelivers on the next pass.
+
+      const lockPath = await acquireSessionLock(
+        sessionPath,
+        sessionLockFor(plan),
+        isAgentActiveStrict,
+      );
+      if (!lockPath) {
+        return refuse(
+          "session locked",
+          `session is already claimed by another process: ${sessionPath}`,
+        );
       }
+      return { ok: true, lockPath, releaseReservation };
+    } catch (error) {
+      return refuse(
+        "herdr unreachable",
+        `could not verify session exclusivity: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -582,6 +723,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
     running,
     launch,
     recover,
+    claimSessionForResume,
     inspect,
     resolveTarget,
     interrupt,

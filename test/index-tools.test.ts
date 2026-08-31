@@ -13,6 +13,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import herdrSubagents, { __test__ } from "../extensions/herdr-subagents/index.ts";
+import {
+  DURABLE_STATE_VERSION,
+  readDurableRecords,
+  writeDurableRecord,
+} from "../src/durable-state.ts";
+import { sessionLockPath } from "../src/session-claim.ts";
 import type { RunningSubagent, SubagentOutcome } from "../src/watcher.ts";
 
 // ── env management (same discipline as index.test.ts) ──────────────────────
@@ -455,6 +461,191 @@ describe("index tools: subagent_resume", () => {
 
     assert.equal(result.details.error, "session active");
     assert.equal(existsSync(`${sessionPath}.exit`), true);
+  });
+
+  it("refuses to resume a session claimed by another Pi process", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "other-parent-child.jsonl");
+    writeChildSession(sessionPath, "still working elsewhere");
+    // Another parent's launch holds a fresh session lock.
+    writeFileSync(
+      sessionLockPath(sessionPath),
+      JSON.stringify({
+        version: 1,
+        id: "other1",
+        liveAgentName: "worker-other1",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-locked",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.equal(result.details.error, "session locked");
+    assert.equal(existsSync(sessionLockPath(sessionPath)), true);
+  });
+
+  it("delivers a gone child's honest exit before claiming its session", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "gone-child.jsonl");
+    writeChildSession(sessionPath, "last words");
+    const durableStateDir = __test__.getDurableStateDir(fx.sessionDir, "orch-session-id");
+    writeDurableRecord(durableStateDir, {
+      version: DURABLE_STATE_VERSION,
+      id: "gone1",
+      name: "Gone",
+      task: "vanished work",
+      paneId: "w1:p7",
+      liveAgentName: "gone-gone1",
+      sessionFile: sessionPath,
+      lifecycleMode: "autonomous",
+      createdAt: new Date().toISOString(),
+    });
+
+    __test__.setDeps({
+      client: makeFakeClient({
+        agentGet: async () => null,
+        paneGet: async () => null,
+      }),
+      watch: async (): Promise<SubagentOutcome> => ({
+        kind: "completed",
+        summary: "resumed fine",
+        exitCode: 0,
+      }),
+      createStream: () => makeFakeStream() as any,
+    });
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-after-gone",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.equal(result.details.status, "started");
+    // The gone child's unsignaled-exit steer was delivered BEFORE the resume
+    // consumed its durable record.
+    assert.ok(fake.sent.length >= 1);
+    assert.equal(fake.sent[0].message.customType, "subagent_result");
+    assert.match(fake.sent[0].message.content, /Gone/);
+    assert.equal(
+      readDurableRecords(durableStateDir).some((record) => record.id === "gone1"),
+      false,
+    );
+  });
+
+  it("fails closed when Herdr cannot be reached during exclusivity checks", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "unverifiable-child.jsonl");
+    writeChildSession(sessionPath, "unknown state");
+    const durableStateDir = __test__.getDurableStateDir(fx.sessionDir, "orch-session-id");
+    writeDurableRecord(durableStateDir, {
+      version: DURABLE_STATE_VERSION,
+      id: "maybe1",
+      name: "Maybe",
+      task: "possibly alive",
+      paneId: "w1:p7",
+      liveAgentName: "maybe-maybe1",
+      sessionFile: sessionPath,
+      lifecycleMode: "autonomous",
+      createdAt: new Date().toISOString(),
+    });
+
+    __test__.setDeps({
+      client: makeFakeClient({
+        agentGet: async () => {
+          throw new Error("socket gone");
+        },
+      }),
+    });
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-unreachable",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.equal(result.details.error, "herdr unreachable");
+    assert.equal(
+      readDurableRecords(durableStateDir).some((record) => record.id === "maybe1"),
+      true,
+      "an unverifiable child's record must survive",
+    );
+  });
+
+  it("keeps the session lock and record when launch fails without confirmed cleanup", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "half-launched.jsonl");
+    writeChildSession(sessionPath, "prior output");
+    const durableStateDir = __test__.getDurableStateDir(fx.sessionDir, "orch-session-id");
+
+    __test__.setDeps({
+      client: makeFakeClient({
+        agentStart: async () => {
+          throw new Error("prompt transport died");
+        },
+        paneClose: async () => {
+          throw new Error("pane unreachable");
+        },
+      }),
+      createStream: () => makeFakeStream() as any,
+    });
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-half",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.ok(result.details.error, "the resume must report the launch failure");
+    // The child may still be alive: lock and durable record survive together
+    // for the next recovery pass.
+    assert.equal(existsSync(sessionLockPath(sessionPath)), true);
+    assert.equal(readDurableRecords(durableStateDir).length, 1);
+    assert.equal(readDurableRecords(durableStateDir)[0].resumeLockPath, sessionLockPath(sessionPath));
+  });
+
+  it("releases the session lock when launch failure cleanup is confirmed", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "clean-failure.jsonl");
+    writeChildSession(sessionPath, "prior output");
+    const durableStateDir = __test__.getDurableStateDir(fx.sessionDir, "orch-session-id");
+
+    __test__.setDeps({
+      client: makeFakeClient({
+        agentStart: async () => {
+          throw new Error("start refused");
+        },
+      }),
+      createStream: () => makeFakeStream() as any,
+    });
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-clean-failure",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.ok(result.details.error);
+    assert.equal(existsSync(sessionLockPath(sessionPath)), false);
+    assert.equal(readDurableRecords(durableStateDir).length, 0);
   });
 
   it("refuses to resume when the persisted launch policy is corrupt", async () => {

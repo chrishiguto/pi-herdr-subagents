@@ -42,7 +42,7 @@ export interface DurableChildRecord {
 
 export type RecoveryDecision =
   /** Sidecar present or agent identity still live: re-arm a watcher. */
-  | { kind: "reattach"; record: DurableChildRecord }
+  | { kind: "reattach"; record: DurableChildRecord; via: "sidecar" | "agent" }
   /** No signal and no live identity: report an unsignaled exit. */
   | { kind: "gone"; record: DurableChildRecord; closePane: boolean };
 
@@ -141,29 +141,39 @@ export function updateDurableChildLocation(
   });
 }
 
+/**
+ * Classify one record for recovery or resume. Transport errors propagate —
+ * callers deciding exclusivity must fail closed, not treat "unreachable" as
+ * "gone".
+ */
+export async function classifyDurableRecord(
+  record: DurableChildRecord,
+  client: RecoveryClient,
+): Promise<RecoveryDecision> {
+  if (hasSemanticSignal(record)) {
+    // The re-armed watcher settles immediately from the sidecar.
+    return { kind: "reattach", record, via: "sidecar" };
+  }
+
+  const agent = await client.agentGet(record.liveAgentName);
+  if (agent && hasMatchingActiveChildIdentity(record, agent)) {
+    return { kind: "reattach", record, via: "agent" };
+  }
+
+  return {
+    kind: "gone",
+    record,
+    closePane: (await client.paneGet(record.paneId)) !== null,
+  };
+}
+
 export async function recoverDurableChildren(
   dir: string,
   client: RecoveryClient,
 ): Promise<RecoveryDecision[]> {
   const decisions: RecoveryDecision[] = [];
   for (const record of readDurableRecords(dir)) {
-    if (hasSemanticSignal(record)) {
-      // The re-armed watcher settles immediately from the sidecar.
-      decisions.push({ kind: "reattach", record });
-      continue;
-    }
-
-    const agent = await client.agentGet(record.liveAgentName);
-    if (agent && hasMatchingActiveChildIdentity(record, agent)) {
-      decisions.push({ kind: "reattach", record });
-      continue;
-    }
-
-    decisions.push({
-      kind: "gone",
-      record,
-      closePane: (await client.paneGet(record.paneId)) !== null,
-    });
+    decisions.push(await classifyDurableRecord(record, client));
   }
   return decisions;
 }

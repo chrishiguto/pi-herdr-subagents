@@ -14,20 +14,16 @@ import { Type } from "typebox";
 import { existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { hasMatchingActiveChildIdentity } from "./active-children.ts";
 import { getAgentConfigDir, loadAgentDefaults } from "./agents.ts";
 import { createHerdrClient, type HerdrClient } from "./herdr/client.ts";
 import { probeHerdrReadiness } from "./herdr/compatibility.ts";
 import { createHerdrEventStream } from "./herdr/events.ts";
-import { readExitSidecar } from "./child-protocol.ts";
 import { contextUsagePath } from "./context-usage.ts";
-import { readDurableRecords, removeDurableRecord } from "./durable-state.ts";
 import { buildLaunchPlan, buildResumeLaunchPlan, resolveResumeLifecycle } from "./launch.ts";
 import { launchPolicyPath, readLaunchPolicy } from "./launch-policy.ts";
 import { formatElapsed, renderSubagentPing, renderSubagentResult } from "./messages.ts";
 import { findLastAssistantMessage, getNewEntries } from "./session.ts";
 import { createSubagentRuntime, describeChildLaunchError } from "./runtime.ts";
-import { acquireResumeLock, releaseResumeLock } from "./resume-lock.ts";
 import { attachStatusWidget } from "./status-widget-controller.ts";
 import {
   InterruptParamsSchema,
@@ -455,43 +451,10 @@ async function executeSubagentResume(
     );
   }
 
-  const releaseReservation = subagentRuntime.reserveSession(params.sessionPath);
-  if (!releaseReservation) {
-    return errorResult(
-      `Error: session is already active: ${params.sessionPath}`,
-      "session active",
-    );
-  }
-
-  // Record entry count before resuming so we can extract only new messages.
-  const entryCountBefore = safeGetNewEntries(params.sessionPath, 0).length;
-  const durableStateDir = getDurableStateDir(
-    ctx.sessionManager.getSessionDir(),
-    ctx.sessionManager.getSessionId(),
-  );
-  for (const record of readDurableRecords(durableStateDir).filter(
-    (candidate) => candidate.sessionFile === params.sessionPath,
-  )) {
-    const hasPendingSignal = readExitSidecar(record.sessionFile, record.id) !== null;
-    const activeAgent = await deps.client.agentGet(record.liveAgentName).catch(() => null);
-    if (
-      hasPendingSignal ||
-      (activeAgent !== null && hasMatchingActiveChildIdentity(record, activeAgent))
-    ) {
-      releaseReservation();
-      return errorResult(
-        `Error: session has an active child or an undelivered result: ${params.sessionPath}`,
-        "session active",
-      );
-    }
-    removeDurableRecord(durableStateDir, record.id);
-  }
-
   // Reapply the persisted launch policy; a corrupt policy file must refuse
   // the resume rather than relaunch the child with degraded restrictions.
   const policyRead = readLaunchPolicy(params.sessionPath);
   if (policyRead.kind === "corrupt") {
-    releaseReservation();
     return errorResult(
       `Error: the persisted launch policy for this session is unreadable or invalid; ` +
         `refusing to resume without its restrictions. Repair or delete ` +
@@ -512,52 +475,51 @@ async function executeSubagentResume(
     });
   } catch (error: any) {
     const message = error?.message ?? String(error);
-    releaseReservation();
     return errorResult(`Failed to plan resume launch: ${message}`, message);
   }
 
-  const lockPath = await acquireResumeLock(
-    params.sessionPath,
-    {
-      version: 1,
-      id: plan.id,
-      liveAgentName: plan.agentStart.liveAgentName,
-      createdAt: new Date().toISOString(),
-    },
-    async (liveAgentName) => (await deps.client.agentGet(liveAgentName).catch(() => null)) !== null,
+  // Record entry count before resuming so we can extract only new messages.
+  const entryCountBefore = safeGetNewEntries(params.sessionPath, 0).length;
+  const durableStateDir = getDurableStateDir(
+    ctx.sessionManager.getSessionDir(),
+    ctx.sessionManager.getSessionId(),
   );
-  if (!lockPath) {
-    releaseReservation();
-    return errorResult(
-      `Error: session is already being resumed: ${params.sessionPath}`,
-      "session active",
-    );
-  }
-  plan.resumeLockPath = lockPath;
 
-  // Stale-sidecar cleanup happens only after both in-process and cross-process
-  // exclusivity have been established.
-  rmSync(`${params.sessionPath}.exit`, { force: true });
-  rmSync(contextUsagePath(params.sessionPath), { force: true });
+  const claim = await subagentRuntime.claimSessionForResume(
+    pi,
+    params.sessionPath,
+    durableStateDir,
+    plan,
+  );
+  if (!claim.ok) {
+    return errorResult(`Error: ${claim.message}`, claim.code);
+  }
 
   let running: RunningSubagent;
   try {
+    // Stale-sidecar cleanup happens only after both in-process and
+    // cross-process exclusivity have been established.
+    rmSync(`${params.sessionPath}.exit`, { force: true });
+    rmSync(contextUsagePath(params.sessionPath), { force: true });
+
     running = await subagentRuntime.launch(
       pi,
       plan,
       { name: plan.name, task: params.message ?? "resumed session" },
       durableStateDir,
-      (outcome) => resolveResumeOutcome(outcome, params.sessionPath, entryCountBefore),
+      {
+        lockPath: claim.lockPath,
+        mapOutcome: (outcome) => resolveResumeOutcome(outcome, params.sessionPath, entryCountBefore),
+      },
     );
   } catch (error: any) {
-    releaseResumeLock(lockPath);
     const { message, code } = describeChildLaunchError(error);
     return errorResult(
       `Failed to launch Pi child for "${plan.name}": ${message}`,
       code,
     );
   } finally {
-    releaseReservation();
+    claim.releaseReservation();
   }
   return {
     content: [{ type: "text" as const, text: `Session "${plan.name}" resumed.` }],
