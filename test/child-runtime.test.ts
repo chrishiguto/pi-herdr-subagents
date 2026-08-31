@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import {
   parseDeniedTools,
   shouldAutoExitOnAgentEnd,
-  writeExitSidecar,
-} from "../subagent-done.ts";
+} from "../src/child-runtime.ts";
+import { writeExitSidecar } from "../src/child-protocol.ts";
 import { writeContextUsageSidecar } from "../src/context-usage.ts";
 import {
   createSubagentActivityTracker,
@@ -47,7 +47,7 @@ it("keeps replacement ownership active when a stale reload watcher settles", () 
   tracker.close();
 });
 
-describe("subagent-done: shouldAutoExitOnAgentEnd", () => {
+describe("child runtime: shouldAutoExitOnAgentEnd", () => {
   it("auto-exits after normal completion regardless of who sent the prompt", () => {
     const messages = [{ role: "assistant", stopReason: "stop" }];
     assert.equal(shouldAutoExitOnAgentEnd(messages), true);
@@ -97,7 +97,7 @@ describe("subagent-done: shouldAutoExitOnAgentEnd", () => {
   });
 });
 
-describe("subagent-done: parseDeniedTools", () => {
+describe("child runtime: parseDeniedTools", () => {
   it("splits and trims comma-separated names, dropping empties", () => {
     assert.deepEqual(parseDeniedTools(" subagent , subagent_resume ,,bash "), [
       "subagent",
@@ -111,7 +111,7 @@ describe("subagent-done: parseDeniedTools", () => {
   });
 });
 
-describe("subagent-done: .exit sidecar shapes (cross-extension contract)", () => {
+describe("child runtime: .exit sidecar shapes (cross-extension contract)", () => {
   function makeSessionFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "herdr-done-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -120,7 +120,7 @@ describe("subagent-done: .exit sidecar shapes (cross-extension contract)", () =>
 
   it("writes a correlated done signal atomically", () => {
     const sessionFile = makeSessionFile();
-    writeExitSidecar(sessionFile, "child-1", { type: "done" });
+    writeExitSidecar({ sessionFile, subagentId: "child-1" }, { type: "done" });
     assert.equal(
       readFileSync(`${sessionFile}.exit`, "utf8"),
       '{"version":1,"subagentId":"child-1","type":"done"}',
@@ -129,7 +129,10 @@ describe("subagent-done: .exit sidecar shapes (cross-extension contract)", () =>
 
   it("ping writes type/name/message in reference byte order", () => {
     const sessionFile = makeSessionFile();
-    writeExitSidecar(sessionFile, "child-1", { type: "ping", name: "Worker", message: "need input" });
+    writeExitSidecar(
+      { sessionFile, subagentId: "child-1" },
+      { type: "ping", name: "Worker", message: "need input" },
+    );
     assert.equal(
       readFileSync(`${sessionFile}.exit`, "utf8"),
       '{"version":1,"subagentId":"child-1","type":"ping","name":"Worker","message":"need input"}',
@@ -161,14 +164,14 @@ describe("subagent-done: .exit sidecar shapes (cross-extension contract)", () =>
   });
 });
 
-describe("subagent-done: module", () => {
-  it("loads standalone and exports a default extension factory", async () => {
-    const mod = await import("../subagent-done.ts");
-    assert.equal(typeof mod.default, "function");
+describe("child runtime: module", () => {
+  it("loads as an internal runtime registrar", async () => {
+    const mod = await import("../src/child-runtime.ts");
+    assert.equal(typeof mod.registerChildRuntime, "function");
   });
 });
 
-describe("subagent-done: subagent_done tool writes sidecar and shuts down", () => {
+describe("child runtime: subagent_done tool writes sidecar and shuts down", () => {
   function makeSessionFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "herdr-done-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -207,8 +210,8 @@ describe("subagent-done: subagent_done tool writes sidecar and shuts down", () =
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
 
     assert.ok(registeredTools.subagent_done, "subagent_done tool should be registered");
     await registeredTools.subagent_done.execute("call-1", {}, null, () => {}, fakeCtx);
@@ -230,7 +233,7 @@ describe("subagent-done: subagent_done tool writes sidecar and shuts down", () =
   });
 });
 
-describe("subagent-done: caller_ping escalation", () => {
+describe("child runtime: caller_ping escalation", () => {
   it("preserves one structured help signal when shutdown is followed by agent_end", async () => {
     const dir = mkdtempSync(join(tmpdir(), "herdr-ping-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -272,8 +275,8 @@ describe("subagent-done: caller_ping escalation", () => {
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
     handlers.agent_start?.();
     await tools.caller_ping.execute(
       "ping-1",
@@ -298,7 +301,7 @@ describe("subagent-done: caller_ping escalation", () => {
   });
 });
 
-describe("subagent-done: user close without subagent_done leaves no sidecar", () => {
+describe("child runtime: user close without subagent_done leaves no sidecar", () => {
   function makeSessionFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "herdr-done-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -336,8 +339,8 @@ describe("subagent-done: user close without subagent_done leaves no sidecar", ()
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
 
     handlers.session_start?.({}, fakeCtx);
     handlers.agent_start?.();
@@ -354,7 +357,7 @@ describe("subagent-done: user close without subagent_done leaves no sidecar", ()
   });
 });
 
-describe("subagent-done: interactive lifecycle", () => {
+describe("child runtime: interactive lifecycle", () => {
   it("stays open across clean and interrupted turns until a terminal tool is called", async () => {
     const dir = mkdtempSync(join(tmpdir(), "herdr-interactive-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -396,8 +399,8 @@ describe("subagent-done: interactive lifecycle", () => {
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
     handlers.agent_start?.();
     handlers.agent_end?.(
       { messages: [{ role: "assistant", stopReason: "stop" }] },
@@ -421,7 +424,7 @@ describe("subagent-done: interactive lifecycle", () => {
   });
 });
 
-describe("subagent-done: session_shutdown context usage fallback", () => {
+describe("child runtime: session_shutdown context usage fallback", () => {
   function makeSessionFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "herdr-done-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -455,8 +458,8 @@ describe("subagent-done: session_shutdown context usage fallback", () => {
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
     handlers.session_shutdown?.({}, fakeCtx);
     usage = { tokens: 90, contextWindow: 100, percent: 90 };
     handlers.session_shutdown?.({}, fakeCtx);
@@ -492,15 +495,15 @@ describe("subagent-done: session_shutdown context usage fallback", () => {
       getAllTools: () => [],
       events: createFakeEventBus(),
     };
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
 
     assert.doesNotThrow(() => handlers.session_shutdown?.({}, { getContextUsage: () => undefined }));
     assert.equal(existsSync(`${sessionFile}.context-usage`), false);
   });
 });
 
-describe("subagent-done: agent_settled writes .exit sidecar on clean auto-exit", () => {
+describe("child runtime: agent_settled writes .exit sidecar on clean auto-exit", () => {
   function makeSessionFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "herdr-done-"));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -539,8 +542,8 @@ describe("subagent-done: agent_settled writes .exit sidecar on clean auto-exit",
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
 
     handlers.session_start?.({}, fakeCtx);
     handlers.agent_start?.();
@@ -564,13 +567,17 @@ describe("subagent-done: agent_settled writes .exit sidecar on clean auto-exit",
     const sessionFile = makeSessionFile();
     const origSession = process.env.PI_SUBAGENT_SESSION;
     const origAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
+    const origId = process.env.PI_SUBAGENT_ID;
     process.env.PI_SUBAGENT_SESSION = sessionFile;
     process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+    process.env.PI_SUBAGENT_ID = "error-child";
     cleanups.push(() => {
       if (origSession !== undefined) process.env.PI_SUBAGENT_SESSION = origSession;
       else delete process.env.PI_SUBAGENT_SESSION;
       if (origAutoExit !== undefined) process.env.PI_SUBAGENT_AUTO_EXIT = origAutoExit;
       else delete process.env.PI_SUBAGENT_AUTO_EXIT;
+      if (origId !== undefined) process.env.PI_SUBAGENT_ID = origId;
+      else delete process.env.PI_SUBAGENT_ID;
     });
 
     const handlers: Record<string, Function> = {};
@@ -588,8 +595,8 @@ describe("subagent-done: agent_settled writes .exit sidecar on clean auto-exit",
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
 
     handlers.session_start?.({}, fakeCtx);
     handlers.agent_start?.();
@@ -609,13 +616,17 @@ describe("subagent-done: agent_settled writes .exit sidecar on clean auto-exit",
     const sessionFile = makeSessionFile();
     const origSession = process.env.PI_SUBAGENT_SESSION;
     const origAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
+    const origId = process.env.PI_SUBAGENT_ID;
     process.env.PI_SUBAGENT_SESSION = sessionFile;
     process.env.PI_SUBAGENT_AUTO_EXIT = "1";
+    process.env.PI_SUBAGENT_ID = "nested-parent";
     cleanups.push(() => {
       if (origSession !== undefined) process.env.PI_SUBAGENT_SESSION = origSession;
       else delete process.env.PI_SUBAGENT_SESSION;
       if (origAutoExit !== undefined) process.env.PI_SUBAGENT_AUTO_EXIT = origAutoExit;
       else delete process.env.PI_SUBAGENT_AUTO_EXIT;
+      if (origId !== undefined) process.env.PI_SUBAGENT_ID = origId;
+      else delete process.env.PI_SUBAGENT_ID;
     });
 
     const handlers: Record<string, Function> = {};
@@ -634,8 +645,8 @@ describe("subagent-done: agent_settled writes .exit sidecar on clean auto-exit",
       ui: { setWidget: () => {} },
     };
 
-    const mod = await import("../subagent-done.ts");
-    mod.default(fakePi as any);
+    const mod = await import("../src/child-runtime.ts");
+    mod.registerChildRuntime(fakePi as any);
     publishSubagentActivity(events, "nested-1", "runtime", true);
     publishSubagentActivity(events, "nested-2", "runtime", true);
     handlers.agent_end?.(

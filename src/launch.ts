@@ -21,13 +21,12 @@ import {
   resolveLaunchBehavior,
 } from "./agents.ts";
 import { makeLiveAgentName } from "./herdr/client.ts";
+import type { SubagentParams } from "./tool-contracts.ts";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ChildThinkingLevel = (typeof THINKING_LEVELS)[number];
 
-export type WorkflowRef =
-  | { kind: "skill"; name: string }
-  | { kind: "prompt"; name: string };
+export type WorkflowRef = NonNullable<SubagentParams["workflow"]>;
 
 /**
  * Compile a portable workflow reference into the child's first prompt. The
@@ -40,22 +39,20 @@ export function compileWorkflowPrompt(workflow: WorkflowRef, task: string): stri
   return `/${commandName} ${task}`;
 }
 
-/** `subagent` tool params consulted by launch planning. */
-export interface SubagentLaunchParams {
-  name: string;
-  task: string;
-  agent?: string;
-  cwd?: string;
-  contextMode?: "standalone" | "lineage-only" | "fork";
-  /** Portable Pi skill/prompt reference, expanded inside the child before its first model request. */
-  workflow?: WorkflowRef;
+/** Public request type derived from the registered TypeBox schema. */
+export type SubagentLaunchParams = SubagentParams;
+
+export interface PersistedLaunchPolicy {
+  version: 1;
+  cwd: string;
   model?: string;
   thinking?: ChildThinkingLevel;
-  tools?: string[] | string;
-  allowNestedDelegation?: boolean;
-  skills?: string;
-  systemPrompt?: string;
-  interactive?: boolean;
+  tools?: string[];
+  allowNestedDelegation: boolean;
+  denyTools?: string;
+  agent?: string;
+  interactive: boolean;
+  autoExit: boolean;
 }
 
 export interface LaunchPlanContext {
@@ -76,8 +73,10 @@ export interface LaunchPlanContext {
   /** Deterministic seams for tests. */
   now?: Date;
   id?: string;
-  /** Override the child extension path (default: <package root>/subagent-done.ts). */
+  /** Override the child extension path (default: the package's single public entrypoint). */
   subagentDonePath?: string;
+  /** Original effective policy, when planning a resume. */
+  resumePolicy?: PersistedLaunchPolicy | null;
 }
 
 export interface LaunchPlan {
@@ -238,7 +237,7 @@ const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done"] as const;
  *
  * Pi 0.70+ applies --tools to built-in, extension, and custom tools. If a
  * subagent definition restricts tools to e.g. "read,bash,write", the child
- * control tools from subagent-done.ts would otherwise be hidden, leaving a
+ * control tools from the composed child runtime would otherwise be hidden, leaving a
  * manually resumed or user-touched subagent unable to call subagent_done.
  */
 export function buildSubagentToolAllowlist(effectiveTools?: string[]): string | null {
@@ -375,7 +374,8 @@ export function buildLaunchPlan(
   // native arguments.
   const piArgv: string[] = ["--session", sessionFile];
 
-  const subagentDonePath = ctx.subagentDonePath ?? join(PACKAGE_ROOT, "subagent-done.ts");
+  const subagentDonePath = ctx.subagentDonePath ??
+    join(PACKAGE_ROOT, "extensions", "herdr-subagents", "index.ts");
   piArgv.push("-e", subagentDonePath);
 
   if (effectiveModel) {
@@ -452,6 +452,21 @@ export function buildLaunchPlan(
   }
   childEnv.PI_SUBAGENT_SESSION = sessionFile;
   childEnv.PI_SUBAGENT_ID = id;
+  files.push({
+    path: `${sessionFile}.herdr-launch-policy.json`,
+    content: `${JSON.stringify({
+      version: 1,
+      cwd: targetCwd,
+      model: effectiveModel,
+      thinking: effectiveThinking,
+      tools: effectiveTools,
+      allowNestedDelegation: runtimePolicy.allowNestedDelegation,
+      denyTools: childEnv.PI_DENY_TOOLS,
+      agent: params.agent,
+      interactive,
+      autoExit,
+    } satisfies PersistedLaunchPolicy)}\n`,
+  });
 
   return {
     id,
@@ -521,10 +536,12 @@ export interface ResumeLaunchPlan {
   initialPrompts: string[];
   interactive: boolean;
   autoExit: boolean;
+  /** Cross-process exclusivity claim held for the resumed session lifecycle. */
+  resumeLockPath?: string;
 }
 
 /**
- * Plan a resume launch: pi --session <existing path> -e subagent-done.ts,
+ * Plan a resume launch with the existing session and the package entrypoint,
  * plus an optional @<artifact> follow-up message. The pane runs in the
  * orchestrator's cwd and Herdr supplies the canonical Pi executable.
  *
@@ -539,7 +556,10 @@ export function buildResumeLaunchPlan(
   const now = ctx.now ?? new Date();
   const id = ctx.id ?? Math.random().toString(16).slice(2, 10);
   const displayName = params.name ?? "Resume";
-  const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
+  const policy = ctx.resumePolicy;
+  const { autoExit, interactive } = resolveResumeLaunchBehavior({
+    autoExit: params.autoExit ?? policy?.autoExit,
+  });
 
   const artifactDir = getArtifactDir(ctx.sessionDir, ctx.sessionId);
   const artifactTimestamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -547,13 +567,24 @@ export function buildResumeLaunchPlan(
   const files: Array<{ path: string; content: string }> = [];
 
   // ── Pi argv ──
-  const subagentDonePath = ctx.subagentDonePath ?? join(PACKAGE_ROOT, "subagent-done.ts");
+  const subagentDonePath = ctx.subagentDonePath ??
+    join(PACKAGE_ROOT, "extensions", "herdr-subagents", "index.ts");
   const piArgv: string[] = ["--session", params.sessionPath, "-e", subagentDonePath];
+  if (policy?.model) piArgv.push("--model", policy.model);
+  if (policy?.thinking) piArgv.push("--thinking", policy.thinking);
+  const toolAllowlist = buildSubagentToolAllowlist(policy?.tools);
+  if (toolAllowlist) piArgv.push("--tools", toolAllowlist);
 
   let resumeMessageFile: string | null = null;
   if (params.message) {
     resumeMessageFile = join(artifactDir, "subagent-resume", `${name}-${artifactTimestamp}.md`);
     files.push({ path: resumeMessageFile, content: params.message });
+  }
+  if (policy) {
+    files.push({
+      path: `${params.sessionPath}.herdr-launch-policy.json`,
+      content: `${JSON.stringify({ ...policy, interactive, autoExit })}\n`,
+    });
   }
   const initialPrompts = resumeMessageFile ? [`@${resumeMessageFile}`] : [];
   const piStartupArgv = [...piArgv];
@@ -565,6 +596,8 @@ export function buildResumeLaunchPlan(
     childEnv.PI_CODING_AGENT_DIR = env.PI_CODING_AGENT_DIR;
   }
   childEnv.PI_SUBAGENT_NAME = displayName;
+  if (policy?.agent) childEnv.PI_SUBAGENT_AGENT = policy.agent;
+  if (policy?.denyTools) childEnv.PI_DENY_TOOLS = policy.denyTools;
   if (autoExit) {
     childEnv.PI_SUBAGENT_AUTO_EXIT = "1";
   }
@@ -581,7 +614,7 @@ export function buildResumeLaunchPlan(
     files,
     paneSplit: {
       sourcePaneId: requireSourcePaneId(env),
-      cwd: ctx.parentCwd,
+      cwd: policy?.cwd ?? ctx.parentCwd,
       env: childEnv,
     },
     agentStart: {

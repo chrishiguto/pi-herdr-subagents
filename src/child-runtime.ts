@@ -1,5 +1,5 @@
 /**
- * Extension loaded into every subagent child pi (via `-e <this file>`).
+ * Child behavior composed by the package's single Pi extension entrypoint.
  * - Shows agent identity + available tools as a styled widget above the editor (toggle with Ctrl+J)
  * - Provides a `subagent_done` tool for autonomous agents to self-terminate
  * - Provides a `caller_ping` tool to ask the parent orchestrator for help
@@ -9,18 +9,14 @@
  * activity recorder stripped (stall detection is discarded in this design —
  * herdr's pane.exited gives truthful lifecycle instead).
  *
- * The `.exit` sidecar written here is a cross-extension contract: the
- * orchestrator's watcher (src/watcher.ts) classifies completion from exactly
- * these shapes — {"type":"done"} and {"type":"ping","name":...,"message":...}.
- * Keep this file dependency-light: it loads into EVERY child.
+ * Keep this module dependency-light: it loads into every child.
  */
 import type { ContextUsage, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { renameSync, writeFileSync } from "node:fs";
-
-import { writeContextUsageSidecar } from "./src/context-usage.ts";
-import { createSubagentActivityTracker } from "./src/runtime-events.ts";
+import { parseChildIdentity, writeExitSidecar } from "./child-protocol.ts";
+import { writeContextUsageSidecar } from "./context-usage.ts";
+import { createSubagentActivityTracker } from "./runtime-events.ts";
 
 /**
  * Whether the run that just ended completed normally. Auto-exit is decided by
@@ -57,32 +53,10 @@ export function parseDeniedTools(rawValue: string | undefined): string[] {
     .filter(Boolean);
 }
 
-export type ExitSidecarData =
-  | { type: "done" }
-  | { type: "ping"; name: string; message: string };
-
-/**
- * Write the completion sidecar the orchestrator's watcher classifies from.
- * Byte-shape must match pi-interactive-subagents exactly (key order included):
- *   {"type":"done"}
- *   {"type":"ping","name":"...","message":"..."}
- */
-export function writeExitSidecar(
-  sessionFile: string,
-  subagentId: string,
-  data: ExitSidecarData,
-): void {
-  const payload =
-    data.type === "done"
-      ? { version: 1 as const, subagentId, type: "done" as const }
-      : { version: 1 as const, subagentId, type: "ping" as const, name: data.name, message: data.message };
-  const target = `${sessionFile}.exit`;
-  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(temporary, JSON.stringify(payload));
-  renameSync(temporary, target);
-}
-
-export default function (pi: ExtensionAPI) {
+export function registerChildRuntime(pi: ExtensionAPI): void {
+  const parsedIdentity = parseChildIdentity();
+  if (!parsedIdentity) return;
+  const identity = parsedIdentity;
   const nestedActivity = createSubagentActivityTracker(pi.events);
   let toolNames: string[] = [];
   let denied: string[] = [];
@@ -94,7 +68,6 @@ export default function (pi: ExtensionAPI) {
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
   const interactive = process.env.PI_SUBAGENT_INTERACTIVE === "1";
   const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1" && !interactive;
-  const subagentId = process.env.PI_SUBAGENT_ID ?? "";
 
   function renderWidget(ctx: { ui: { setWidget: Function } }) {
     ctx.ui.setWidget(
@@ -157,9 +130,8 @@ export default function (pi: ExtensionAPI) {
   ): void {
     if (contextUsageWritten) return;
 
-    const sessionFile = process.env.PI_SUBAGENT_SESSION;
-    const id = process.env.PI_SUBAGENT_ID;
-    if (!sessionFile || !id) return;
+    const sessionFile = identity.sessionFile;
+    const id = identity.subagentId;
 
     let usage: ContextUsage | null | undefined;
     try {
@@ -214,7 +186,7 @@ export default function (pi: ExtensionAPI) {
     const sessionFile = process.env.PI_SUBAGENT_SESSION;
     if (sessionFile) {
       snapshotContextUsage(ctx);
-      writeExitSidecar(sessionFile, subagentId, { type: "done" });
+      writeExitSidecar(identity, { type: "done" });
     }
     ctx.shutdown();
   });
@@ -264,7 +236,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       snapshotContextUsage(ctx);
-      writeExitSidecar(sessionFile, subagentId, {
+      writeExitSidecar(identity, {
         type: "ping",
         name: process.env.PI_SUBAGENT_NAME ?? "subagent",
         message,
@@ -293,7 +265,7 @@ export default function (pi: ExtensionAPI) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
       if (sessionFile) {
         snapshotContextUsage(ctx);
-        writeExitSidecar(sessionFile, subagentId, { type: "done" });
+        writeExitSidecar(identity, { type: "done" });
         terminalSignalWritten = true;
       }
       ctx.shutdown();

@@ -3,9 +3,10 @@
 // A correlated semantic sidecar is the only success signal. Herdr agent/pane
 // disappearance without that signal is an explicit failure after a short grace
 // window, allowing the child bridge's final atomic rename to win close races.
-import { readFileSync, watch as fsWatch, type FSWatcher } from "node:fs";
+import { watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, dirname } from "node:path";
 
+import { readExitSidecar } from "./child-protocol.ts";
 import { updateDurableChildLocation } from "./durable-state.ts";
 import type { AgentInfo, PaneInfo } from "./herdr/client.ts";
 import type { HerdrPaneEvent } from "./herdr/events.ts";
@@ -25,6 +26,7 @@ export interface RunningSubagent {
   durableStateDir?: string;
   interactive: boolean;
   autoExit: boolean;
+  resumeLockPath?: string;
   abortController?: AbortController;
 }
 
@@ -77,22 +79,6 @@ export interface WatcherDeps {
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_UNSIGNALED_GRACE_MS = 100;
 
-type ExitSignal =
-  | { version: 1; subagentId: string; type: "done" }
-  | { version: 1; subagentId: string; type: "ping"; name: string; message: string };
-
-function isExitSignal(value: unknown, subagentId: string): value is ExitSignal {
-  if (!value || typeof value !== "object") return false;
-  const signal = value as Record<string, unknown>;
-  if (signal.version !== 1 || signal.subagentId !== subagentId) return false;
-  if (signal.type === "done") return true;
-  return (
-    signal.type === "ping" &&
-    typeof signal.name === "string" &&
-    typeof signal.message === "string"
-  );
-}
-
 export function watchSubagent(
   running: RunningSubagent,
   deps: WatcherDeps,
@@ -135,13 +121,8 @@ export function watchSubagent(
       }
     }
 
-    function readExitSignal(): ExitSignal | null {
-      try {
-        const candidate: unknown = JSON.parse(readFileSync(exitFile, "utf8"));
-        return isExitSignal(candidate, running.id) ? candidate : null;
-      } catch {
-        return null;
-      }
+    function readExitSignal() {
+      return readExitSidecar(running.sessionFile, running.id);
     }
 
     function settleSemantic(): boolean {

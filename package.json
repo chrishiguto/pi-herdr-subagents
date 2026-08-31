@@ -14,7 +14,6 @@
   },
   "files": [
     "extensions/",
-    "subagent-done.ts",
     "src/"
   ],
   "engines": {
