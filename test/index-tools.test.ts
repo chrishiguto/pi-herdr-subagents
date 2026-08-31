@@ -729,7 +729,7 @@ describe("index tools: subagent_resume", () => {
     assert.equal(result.details.paneId, "w1:p7");
     assert.equal(sidecarsAtLaunch, false, "stale sidecars removed before launch");
     assert.ok(launchedArgv, "agentStart called");
-    const observedArgv = launchedArgv as unknown as string[];
+    const observedArgv: string[] = launchedArgv!;
     assert.equal(observedArgv[0], "--session");
     assert.ok(observedArgv.includes(sessionPath), "argv resumes the given session");
     assert.equal(submittedPrompts.length, 1);

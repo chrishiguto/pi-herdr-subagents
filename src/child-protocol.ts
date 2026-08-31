@@ -4,9 +4,20 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 export const CHILD_PROTOCOL_VERSION = 1 as const;
 const SAFE_SUBAGENT_ID = /^[A-Za-z0-9_-]+$/;
 
-export interface ChildIdentity {
+/** The correlation pair every semantic sidecar is keyed by. */
+export interface ChildCorrelation {
   sessionFile: string;
   subagentId: string;
+}
+
+/** The full env contract a parent hands its child. */
+export interface ChildIdentity extends ChildCorrelation {
+  /** PI_SUBAGENT_NAME — display name; empty when the parent set none. */
+  name: string;
+  /** PI_SUBAGENT_AGENT — agent-definition name; empty for generic children. */
+  agent: string;
+  interactive: boolean;
+  autoExit: boolean;
 }
 
 export type ExitSidecarData =
@@ -31,7 +42,7 @@ export function parseDeniedTools(rawValue: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/** Parse the child identity as one contract: both fields are absent, or both are valid. */
+/** Parse the child identity as one contract: both key fields are absent, or both are valid. */
 export function parseChildIdentity(
   env: Record<string, string | undefined> = process.env,
 ): ChildIdentity | null {
@@ -42,14 +53,22 @@ export function parseChildIdentity(
   if (!subagentId || !SAFE_SUBAGENT_ID.test(subagentId)) {
     throw new Error("PI_SUBAGENT_ID must contain only letters, digits, _ or -.");
   }
-  return { sessionFile, subagentId };
+  const interactive = env.PI_SUBAGENT_INTERACTIVE === "1";
+  return {
+    sessionFile,
+    subagentId,
+    name: env.PI_SUBAGENT_NAME ?? "",
+    agent: env.PI_SUBAGENT_AGENT ?? "",
+    interactive,
+    autoExit: env.PI_SUBAGENT_AUTO_EXIT === "1" && !interactive,
+  };
 }
 
 export function exitSidecarPath(sessionFile: string): string {
   return `${sessionFile}.exit`;
 }
 
-export function writeExitSidecar(identity: ChildIdentity, data: ExitSidecarData): void {
+export function writeExitSidecar(identity: ChildCorrelation, data: ExitSidecarData): void {
   const payload: ExitSidecar =
     data.type === "done"
       ? {

@@ -14,7 +14,12 @@
 import type { ContextUsage, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { parseChildIdentity, parseDeniedTools, writeExitSidecar } from "./child-protocol.ts";
+import {
+  parseChildIdentity,
+  parseDeniedTools,
+  writeExitSidecar,
+  type ExitSidecarData,
+} from "./child-protocol.ts";
 import { writeContextUsageSidecar } from "./context-usage.ts";
 import { createSubagentActivityTracker } from "./runtime-events.ts";
 
@@ -55,12 +60,7 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
   let denied: string[] = [];
   let expanded = false;
 
-  // Read subagent identity from env vars (set by parent orchestrator)
-  const subagentName = process.env.PI_SUBAGENT_NAME ?? "";
-  const subagentAgent = process.env.PI_SUBAGENT_AGENT ?? "";
   const deniedToolsValue = process.env.PI_DENY_TOOLS;
-  const interactive = process.env.PI_SUBAGENT_INTERACTIVE === "1";
-  const autoExit = process.env.PI_SUBAGENT_AUTO_EXIT === "1" && !interactive;
 
   function renderWidget(ctx: { ui: { setWidget: Function } }) {
     ctx.ui.setWidget(
@@ -68,7 +68,7 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
       (_tui: any, theme: any) => {
         const box = new Box(1, 0, (text: string) => theme.bg("toolSuccessBg", text));
 
-        const label = subagentAgent || subagentName;
+        const label = identity.agent || identity.name;
         const agentTag = label ? theme.bold(theme.fg("accent", `[${label}]`)) : "";
 
         if (expanded) {
@@ -143,6 +143,20 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
     }
   }
 
+  /**
+   * Publish the terminal semantic signal: snapshot telemetry, write the
+   * correlated sidecar, and latch the flag every terminal path checks —
+   * one function so no path can signal without latching.
+   */
+  function writeTerminalSignal(
+    ctx: { getContextUsage?: () => ContextUsage | null | undefined },
+    data: ExitSidecarData,
+  ): void {
+    snapshotContextUsage(ctx);
+    writeExitSidecar(identity, data);
+    terminalSignalWritten = true;
+  }
+
   // Show widget on session start
   pi.on("session_start", (_event, ctx) => {
     const tools = pi.getAllTools();
@@ -166,7 +180,7 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
     // live session to steer. Stay open until every nested child has settled.
     if (
       terminalSignalWritten ||
-      !autoExit ||
+      !identity.autoExit ||
       !latestRunCompletedNormally ||
       !ctx.isIdle() ||
       nestedActivity.count() > 0
@@ -176,11 +190,7 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
 
     // Pi has no retry, compaction, or queued continuation left. Publish the
     // semantic completion before shutting down so the parent can recover it.
-    const sessionFile = process.env.PI_SUBAGENT_SESSION;
-    if (sessionFile) {
-      snapshotContextUsage(ctx);
-      writeExitSidecar(identity, { type: "done" });
-    }
+    writeTerminalSignal(ctx, { type: "done" });
     ctx.shutdown();
   });
 
@@ -216,26 +226,16 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
       message: Type.String({ minLength: 1, description: "What you need help with" }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (!sessionFile) {
-        throw new Error(
-          "caller_ping is only available in subagent contexts. " +
-          "PI_SUBAGENT_SESSION environment variable is not set.",
-        );
-      }
       const message = params.message.trim();
       if (!message) {
         throw new Error("caller_ping requires a clear, non-empty help question.");
       }
 
-      snapshotContextUsage(ctx);
-      writeExitSidecar(identity, {
+      writeTerminalSignal(ctx, {
         type: "ping",
-        name: process.env.PI_SUBAGENT_NAME ?? "subagent",
+        name: identity.name || "subagent",
         message,
       });
-      terminalSignalWritten = true;
-
       ctx.shutdown();
       return {
         content: [
@@ -255,12 +255,7 @@ export function registerChildRuntime(pi: ExtensionAPI): void {
       "Your LAST assistant message before calling this becomes the summary returned to the caller.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const sessionFile = process.env.PI_SUBAGENT_SESSION;
-      if (sessionFile) {
-        snapshotContextUsage(ctx);
-        writeExitSidecar(identity, { type: "done" });
-        terminalSignalWritten = true;
-      }
+      writeTerminalSignal(ctx, { type: "done" });
       ctx.shutdown();
       return {
         content: [{ type: "text", text: "Shutting down subagent session." }],

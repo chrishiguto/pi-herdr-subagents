@@ -29,13 +29,12 @@ function candidate(id: string, createdAt = new Date().toISOString()) {
 }
 
 describe("session exclusivity lock", () => {
-  it("allows exactly one claimant when acquisition interleaves", async () => {
+  it("allows exactly one simultaneous claimant", async () => {
     const session = sessionFile();
-    // The losing claimant's liveness probe yields, so both claims are in
-    // flight together; only the wx open can decide the winner.
+    // The exclusive wx open is the whole arbiter: the loser sees EEXIST and,
+    // because the winner's lock is fresh, is denied without any probe.
     const probe = async () => {
-      await new Promise((resolve) => setImmediate(resolve));
-      return true;
+      throw new Error("a fresh lock must be denied without probing liveness");
     };
     const [first, second] = await Promise.all([
       acquireSessionLock(session, candidate("first"), probe),
