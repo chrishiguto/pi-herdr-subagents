@@ -429,6 +429,32 @@ describe("index tools: subagent_resume", () => {
     assert.match(result.content[0].text, /session file not found/);
   });
 
+  it("rejects an active session before deleting its valid result sidecar", async () => {
+    const fake = registerAll();
+    const fx = makeFixture();
+    const sessionPath = join(fx.root, "active-child.jsonl");
+    writeChildSession(sessionPath, "finished output");
+    writeFileSync(
+      `${sessionPath}.exit`,
+      JSON.stringify({ version: 1, subagentId: "active-1", type: "done" }),
+    );
+    __test__.runningSubagents.set(
+      "active-1",
+      makeRunning({ id: "active-1", sessionFile: sessionPath }),
+    );
+
+    const result = await fake.findTool("subagent_resume").execute(
+      "resume-active",
+      { sessionPath },
+      undefined,
+      undefined,
+      fx.ctx,
+    );
+
+    assert.equal(result.details.error, "session active");
+    assert.equal(existsSync(`${sessionPath}.exit`), true);
+  });
+
   it("clears stale sidecars, launches via argv, and extracts only NEW entries for the summary", async () => {
     const fake = registerAll();
     const fx = makeFixture();
@@ -490,8 +516,9 @@ describe("index tools: subagent_resume", () => {
     assert.equal(result.details.paneId, "w1:p7");
     assert.equal(sidecarsAtLaunch, false, "stale sidecars removed before launch");
     assert.ok(launchedArgv, "agentStart called");
-    assert.equal(launchedArgv![0], "--session");
-    assert.ok(launchedArgv!.includes(sessionPath), "argv resumes the given session");
+    const observedArgv = launchedArgv as unknown as string[];
+    assert.equal(observedArgv[0], "--session");
+    assert.ok(observedArgv.includes(sessionPath), "argv resumes the given session");
     assert.equal(submittedPrompts.length, 1);
     assert.match(submittedPrompts[0], /^@.*subagent-resume/);
     assert.equal(launchEnv!.PI_SUBAGENT_AUTO_EXIT, "1", "auto-exit defaults to true");

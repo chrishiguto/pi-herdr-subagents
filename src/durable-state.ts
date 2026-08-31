@@ -2,9 +2,8 @@
 // reload/restart can reattach live children and honestly report gone ones.
 //
 // Delivery is at-least-once: a record is removed only after its outcome steer
-// was handed to Pi. There is no claim/ownership protocol — one Pi process owns
-// an orchestrator session, and the module-level AbortController already stops
-// the previous extension generation's watchers on /reload.
+// was handed to Pi. Session-scoped runtime generations ensure obsolete
+// watchers retain records for the replacement generation to recover.
 import {
   closeSync,
   existsSync,
@@ -20,6 +19,7 @@ import {
 import { join } from "node:path";
 
 import { hasMatchingActiveChildIdentity } from "./active-children.ts";
+import { readExitSidecar } from "./child-protocol.ts";
 import type { AgentInfo } from "./herdr/client.ts";
 
 export const DURABLE_STATE_VERSION = 1 as const;
@@ -35,6 +35,7 @@ export interface DurableChildRecord {
   liveAgentName: string;
   sessionFile: string;
   lifecycleMode: "autonomous" | "interactive" | "manual";
+  resumeLockPath?: string;
   createdAt: string;
 }
 
@@ -77,6 +78,7 @@ function isRecord(value: unknown): value is DurableChildRecord {
     (record.lifecycleMode === "autonomous" ||
       record.lifecycleMode === "interactive" ||
       record.lifecycleMode === "manual") &&
+    (record.resumeLockPath === undefined || typeof record.resumeLockPath === "string") &&
     typeof record.createdAt === "string"
   );
 }
@@ -122,14 +124,7 @@ export function removeDurableRecord(dir: string, childId: string): void {
 }
 
 function hasSemanticSignal(record: DurableChildRecord): boolean {
-  try {
-    const value: unknown = JSON.parse(readFileSync(`${record.sessionFile}.exit`, "utf8"));
-    if (!value || typeof value !== "object") return false;
-    const signal = value as Record<string, unknown>;
-    return signal.version === 1 && signal.subagentId === record.id;
-  } catch {
-    return false;
-  }
+  return readExitSidecar(record.sessionFile, record.id) !== null;
 }
 
 export function updateDurableChildLocation(

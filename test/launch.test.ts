@@ -76,7 +76,7 @@ describe("native launch planning", () => {
 
   it("passes model, tools, system prompt, and curated environment natively", () => {
     const plan = planLaunch(
-      { name: "Review Bot", task: "Review", model: "openai/gpt", tools: "read,bash", systemPrompt: "Be exact" },
+      { name: "Review Bot", task: "Review", model: "openai/gpt", tools: ["read", "bash"], systemPrompt: "Be exact" },
       { systemPromptMode: "append", thinking: "high", denyTools: "write" },
       fixture(),
     );
@@ -206,6 +206,36 @@ describe("native launch planning", () => {
     assert.equal(plan.autoExit, true);
     assert.deepEqual(plan.agentStart.argv.slice(0, 2), ["--session", sessionPath]);
     assert.deepEqual(plan.initialPrompts, [`@${plan.resumeMessageFile}`]);
+  });
+
+  it("reapplies the original runtime policy when resuming", () => {
+    const ctx = fixture();
+    const originalCwd = join(dirname(ctx.parentCwd), "original-work");
+    mkdirSync(originalCwd);
+    ctx.resumePolicy = {
+      version: 1,
+      cwd: originalCwd,
+      model: "openai/gpt-5",
+      thinking: "high",
+      tools: ["read", "bash"],
+      allowNestedDelegation: false,
+      denyTools: "subagent,subagent_resume,subagent_interrupt,subagents_list",
+      agent: "worker",
+      interactive: true,
+      autoExit: false,
+    };
+
+    const plan = buildResumeLaunchPlan({ sessionPath: "/tmp/prior.jsonl" }, ctx);
+
+    assert.equal(plan.paneSplit.cwd, originalCwd);
+    assert.equal(plan.interactive, true);
+    assert.equal(plan.autoExit, false);
+    assert.deepEqual(plan.agentStart.argv.slice(-6), [
+      "--model", "openai/gpt-5", "--thinking", "high", "--tools",
+      "read,bash,caller_ping,subagent_done",
+    ]);
+    assert.equal(plan.paneSplit.env.PI_SUBAGENT_AGENT, "worker");
+    assert.match(plan.paneSplit.env.PI_DENY_TOOLS, /subagent_resume/);
   });
 
   it("marks an interactive resume and preserves the same session", () => {
