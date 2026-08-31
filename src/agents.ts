@@ -14,21 +14,24 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+import type { SubagentParams } from "./tool-contracts.ts";
+
 export type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
 
-/** The subset of `subagent` tool params that agent-def resolution consults. */
-export interface SubagentSpawnParams {
-  name: string;
-  task: string;
-  agent?: string;
-  cwd?: string;
-  model?: string;
-  thinking?: string;
-  tools?: string[] | string;
-  allowNestedDelegation?: boolean;
-  contextMode?: SubagentSessionMode;
-  interactive?: boolean;
-}
+/** The public request fields consulted by agent-definition resolution. */
+export type SubagentSpawnParams = Pick<
+  SubagentParams,
+  | "name"
+  | "task"
+  | "agent"
+  | "cwd"
+  | "model"
+  | "thinking"
+  | "tools"
+  | "allowNestedDelegation"
+  | "contextMode"
+  | "interactive"
+>;
 
 export interface AgentDefaults {
   model?: string;
@@ -202,10 +205,13 @@ export function resolveEffectiveInteractive(
   return !(agentDefs?.autoExit ?? false);
 }
 
-export function loadAgentDefaults(agentName: string): AgentDefaults | null {
+export function loadAgentDefaults(
+  agentName: string,
+  projectCwd: string = process.cwd(),
+): AgentDefaults | null {
   const configDir = getAgentConfigDir();
   const paths = [
-    join(process.cwd(), ".pi", "agents", `${agentName}.md`),
+    join(projectCwd, ".pi", "agents", `${agentName}.md`),
     join(configDir, "agents", `${agentName}.md`),
   ];
 
