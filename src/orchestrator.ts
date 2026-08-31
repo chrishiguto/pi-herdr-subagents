@@ -23,7 +23,11 @@ import { buildLaunchPlan, buildResumeLaunchPlan, resolveResumeLifecycle } from "
 import { launchPolicyPath, readLaunchPolicy } from "./launch-policy.ts";
 import { formatElapsed, renderSubagentPing, renderSubagentResult } from "./messages.ts";
 import { findLastAssistantMessage, getNewEntries } from "./session.ts";
-import { createSubagentRuntime, describeChildLaunchError } from "./runtime.ts";
+import {
+  createSubagentRuntime,
+  describeChildLaunchError,
+  type SubagentRuntime,
+} from "./runtime.ts";
 import { attachStatusWidget } from "./status-widget-controller.ts";
 import {
   InterruptParamsSchema,
@@ -48,9 +52,11 @@ import {
 
 // ── runtime generation ownership ───────────────────────────────────────────
 // A Pi process can replace sessions without re-importing extensions. Each
-// session therefore gets a fresh generation, while /reload replaces the module
-// owner for this exact extension source. Scoping by source identity prevents a
-// second installed copy from silently aborting this copy's children.
+// session gets a fresh generation that OWNS its runtime instance — running
+// map, reservations, event stream, abort signal — so no state ever needs to
+// guard against another generation. /reload replaces the module owner for
+// this exact extension source; scoping by source identity prevents a second
+// installed copy from silently aborting this copy's children.
 
 const sourceUrl = new URL(import.meta.url);
 sourceUrl.search = "";
@@ -59,39 +65,6 @@ const OWNER_KEY = Symbol.for(`pi-herdr-subagents/runtime-owner/${sourceUrl.href}
 
 /** Tags this module generation's activity events (see src/runtime-events.ts). */
 const runtimeOwner = `runtime-${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
-
-interface RuntimeGenerationOwner {
-  controller: AbortController;
-  stream: WatcherStream | null;
-  replace(): void;
-  stop(): void;
-}
-
-function createRuntimeGenerationOwner(): RuntimeGenerationOwner {
-  const owner: RuntimeGenerationOwner = {
-    controller: new AbortController(),
-    stream: null,
-    replace() {
-      owner.stop();
-      owner.controller = new AbortController();
-    },
-    stop() {
-      owner.controller.abort();
-      owner.stream?.close();
-      owner.stream = null;
-    },
-  };
-  return owner;
-}
-
-const previousOwner = (globalThis as any)[OWNER_KEY] as RuntimeGenerationOwner | undefined;
-previousOwner?.stop();
-const generationOwner = createRuntimeGenerationOwner();
-(globalThis as any)[OWNER_KEY] = generationOwner;
-
-function getModuleAbortSignal(): AbortSignal {
-  return generationOwner.controller.signal;
-}
 
 // ── injectable runtime deps (unit-test seam) ────────────────────────────────
 
@@ -113,30 +86,68 @@ function defaultDeps(): RuntimeDeps {
 
 let deps: RuntimeDeps = defaultDeps();
 
-/**
- * One shared HerdrEventStream per pi process (PLAN.md Key Decision #8),
- * created lazily on first spawn — no persistent socket while zero subagents
- * have ever run. Closed with its owning session generation.
- */
-function getEventStream(): WatcherStream {
-  if (!generationOwner.stream) {
-    generationOwner.stream = deps.createStream(
-      process.env.HERDR_SOCKET_PATH ?? "",
-      getModuleAbortSignal(),
-    );
-  }
-  return generationOwner.stream;
+interface RuntimeGeneration {
+  controller: AbortController;
+  stream: WatcherStream | null;
+  runtime: SubagentRuntime;
 }
 
-// ── shared module state ─────────────────────────────────────────────────────
+function createGeneration(): RuntimeGeneration {
+  const controller = new AbortController();
+  const generation = { controller, stream: null } as RuntimeGeneration;
+  generation.runtime = createSubagentRuntime({
+    getClient: () => deps.client,
+    getWatcher: () => deps.watch,
+    // One shared HerdrEventStream per generation (PLAN.md Key Decision #8),
+    // created lazily on first spawn — no persistent socket while zero
+    // subagents have ever run. Closed with its owning generation.
+    getStream: () => {
+      if (!generation.stream) {
+        generation.stream = deps.createStream(
+          process.env.HERDR_SOCKET_PATH ?? "",
+          controller.signal,
+        );
+      }
+      return generation.stream;
+    },
+    signal: controller.signal,
+    runtimeOwner,
+  });
+  return generation;
+}
 
-const subagentRuntime = createSubagentRuntime({
-  getClient: () => deps.client,
-  getWatcher: () => deps.watch,
-  getStream: getEventStream,
-  getModuleSignal: getModuleAbortSignal,
-  runtimeOwner,
-});
+interface RuntimeGenerationOwner {
+  current: RuntimeGeneration;
+  replace(): void;
+  stop(): void;
+}
+
+function createRuntimeGenerationOwner(): RuntimeGenerationOwner {
+  const owner: RuntimeGenerationOwner = {
+    current: createGeneration(),
+    replace() {
+      owner.stop();
+      owner.current = createGeneration();
+    },
+    stop() {
+      owner.current.runtime.shutdown();
+      owner.current.controller.abort();
+      owner.current.stream?.close();
+      owner.current.stream = null;
+    },
+  };
+  return owner;
+}
+
+const previousOwner = (globalThis as any)[OWNER_KEY] as RuntimeGenerationOwner | undefined;
+previousOwner?.stop();
+const generationOwner = createRuntimeGenerationOwner();
+(globalThis as any)[OWNER_KEY] = generationOwner;
+
+/** The live generation's runtime. Tool closures must resolve this per call. */
+function runtime(): SubagentRuntime {
+  return generationOwner.current.runtime;
+}
 
 export function isInsideHerdr(env: Record<string, string | undefined> = process.env): boolean {
   return env.HERDR_ENV === "1" && !!env.HERDR_PANE_ID && !!env.HERDR_SOCKET_PATH;
@@ -157,7 +168,7 @@ async function recoverChildren(
     ctx.sessionManager.getSessionDir(),
     ctx.sessionManager.getSessionId(),
   );
-  await subagentRuntime.recover(pi, durableStateDir);
+  await runtime().recover(pi, durableStateDir);
 }
 
 const SUBAGENT_DESCRIPTION =
@@ -284,7 +295,7 @@ async function executeSubagentSpawn(
   );
   let running: RunningSubagent;
   try {
-    running = await subagentRuntime.launch(
+    running = await runtime().launch(
       pi,
       plan,
       { name: params.name, task: params.task, agent: params.agent },
@@ -485,7 +496,7 @@ async function executeSubagentResume(
     ctx.sessionManager.getSessionId(),
   );
 
-  const claim = await subagentRuntime.claimSessionForResume(
+  const claim = await runtime().claimSessionForResume(
     pi,
     params.sessionPath,
     durableStateDir,
@@ -502,7 +513,7 @@ async function executeSubagentResume(
     rmSync(`${params.sessionPath}.exit`, { force: true });
     rmSync(contextUsagePath(params.sessionPath), { force: true });
 
-    running = await subagentRuntime.launch(
+    running = await runtime().launch(
       pi,
       plan,
       { name: plan.name, task: params.message ?? "resumed session" },
@@ -583,7 +594,7 @@ async function handleSubagentInterrupt(params: InterruptParams): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: InterruptToolDetails;
 }> {
-  const resolved = await subagentRuntime.interrupt(params);
+  const resolved = await runtime().interrupt(params);
   if (!resolved.ok) {
     if (resolved.reason === "missing" || resolved.reason === "ambiguous" || resolved.reason === "stale") {
       return errorResult(resolved.message, resolved.message);
@@ -671,7 +682,7 @@ function registerListTool(pi: ExtensionAPI): void {
     parameters: ListParamsSchema,
 
     async execute() {
-      const active = await subagentRuntime.inspect();
+      const active = await runtime().inspect();
 
       if (active.length === 0) {
         return {
@@ -796,7 +807,7 @@ export function registerOrchestrator(pi: ExtensionAPI): void {
 
     generationOwner.replace();
     detachStatusWidget?.();
-    detachStatusWidget = attachStatusWidget(pi.events, ctx, subagentRuntime);
+    detachStatusWidget = attachStatusWidget(pi.events, ctx, runtime());
 
     // Socket reachability check (async; visible notify on failure).
     void probeHerdrReadiness(() => deps.client.ping()).then((readiness) => {
@@ -816,7 +827,6 @@ export function registerOrchestrator(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => {
     detachStatusWidget?.();
     detachStatusWidget = null;
-    subagentRuntime.shutdown();
     generationOwner.stop();
   });
 
@@ -834,8 +844,10 @@ export function registerOrchestrator(pi: ExtensionAPI): void {
 
 export const __test__ = {
   isInsideHerdr,
-  runningSubagents: subagentRuntime.running,
-  resolveTarget: subagentRuntime.resolveTarget,
+  get runningSubagents() {
+    return runtime().running;
+  },
+  resolveTarget: (params: { id?: string; name?: string }) => runtime().resolveTarget(params),
   resolveResumeLifecycle,
   resolveResumeOutcome,
   recoverChildren,
@@ -845,7 +857,6 @@ export const __test__ = {
   },
   reset(): void {
     deps = defaultDeps();
-    subagentRuntime.shutdown();
     generationOwner.replace();
   },
 };

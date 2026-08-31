@@ -236,7 +236,13 @@ export interface SubagentRuntimeOptions {
   getClient(): HerdrClient;
   getWatcher(): Watcher;
   getStream(): WatcherDeps["stream"];
-  getModuleSignal(): AbortSignal;
+  /**
+   * The owning generation's abort signal. A runtime lives and dies with one
+   * session generation: aborting the signal cancels its watchers, and a
+   * replacement generation constructs a fresh runtime rather than sharing
+   * this one's state.
+   */
+  signal: AbortSignal;
   /** Tags this module generation's activity events (see runtime-events.ts). */
   runtimeOwner: string;
 }
@@ -356,10 +362,10 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
   function arm(
     pi: ExtensionAPI,
     child: RunningSubagent,
-    generationSignal: AbortSignal,
     mapOutcome?: (outcome: SubagentOutcome) => SubagentOutcome,
   ): void {
     eventBus = pi.events;
+    const generationSignal = options.signal;
     const watcherAbort = new AbortController();
     child.abortController = watcherAbort;
 
@@ -378,12 +384,10 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
         signal: watcherAbort.signal,
       })
       .then((outcome) => {
-        if (running.get(child.id) === child) {
-          running.delete(child.id);
-          publish(child, false);
-        }
-        // Cancelled means module abort/reload: keep the durable record so the
-        // next runtime generation can recover the child.
+        running.delete(child.id);
+        publish(child, false);
+        // Cancelled means generation abort/reload: keep the durable record so
+        // the next runtime generation can recover the child.
         if (outcome.kind === "cancelled") return;
 
         void closeSettledPane(child.paneId, child.liveAgentName);
@@ -427,10 +431,8 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
         });
       })
       .catch((error: unknown) => {
-        if (running.get(child.id) === child) {
-          running.delete(child.id);
-          publish(child, false);
-        }
+        running.delete(child.id);
+        publish(child, false);
         try {
           const detail = error instanceof Error ? error.message : String(error);
           pi.sendMessage(
@@ -476,8 +478,6 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
       mapOutcome?: (outcome: SubagentOutcome) => SubagentOutcome;
     } = {},
   ): Promise<RunningSubagent> {
-    const generationSignal = options.getModuleSignal();
-
     // Initial launches claim the session too, so a live child denies resumes
     // from any Pi process for its whole lifecycle.
     let lockPath = opts.lockPath;
@@ -508,7 +508,7 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
       terminalId: child.terminalId,
       liveAgentName: child.liveAgentName,
     });
-    arm(pi, child, generationSignal, opts.mapOutcome);
+    arm(pi, child, opts.mapOutcome);
     return child;
   }
 
@@ -556,13 +556,12 @@ export function createSubagentRuntime(options: SubagentRuntimeOptions) {
   }
 
   async function recover(pi: ExtensionAPI, durableStateDir: string): Promise<void> {
-    const generationSignal = options.getModuleSignal();
     eventBus = pi.events;
     const decisions = await recoverDurableChildren(durableStateDir, options.getClient());
 
     for (const decision of decisions) {
       if (decision.kind === "reattach") {
-        arm(pi, runningFromDurableRecord(decision.record, durableStateDir), generationSignal);
+        arm(pi, runningFromDurableRecord(decision.record, durableStateDir));
         continue;
       }
       deliverGoneChild(pi, decision, durableStateDir);

@@ -859,6 +859,20 @@ describe("index: subagent tool", () => {
 
     assert.deepEqual(fake.sent, []);
     assert.equal(readDurableRecords(stateDir).length, 1);
+
+    // "only": the replacement generation is live — it recovers the retained
+    // record and delivers the honest outcome the old generation withheld.
+    replacement.__test__.setDeps({
+      client: makeFakeClient({
+        agentGet: async () => null,
+        paneGet: async () => null,
+      }),
+      createStream: () => makeFakeStream() as any,
+    });
+    await replacement.__test__.recoverChildren(fake.api, fx.ctx);
+    assert.equal(fake.sent.length, 1, "replacement generation must deliver");
+    assert.match(fake.sent[0].message.content, /Worker/);
+    assert.deepEqual(readDurableRecords(stateDir), []);
     replacement.__test__.reset();
   });
 
