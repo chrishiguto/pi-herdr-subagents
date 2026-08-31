@@ -1,0 +1,52 @@
+{
+  "name": "pi-herdr-subagents",
+  "version": "0.1.0",
+  "description": "Interactive subagent orchestration for pi, built natively on herdr — spawn, resume, and interrupt subagents in herdr panes with truthful lifecycle events",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "author": "Justin",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chrishiguto/pi-herdr-subagents.git"
+  },
+  "files": [
+    "extensions/",
+    "subagent-done.ts",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "herdr": {
+    "version": ">=0.8.2 <0.9",
+    "protocol": 20
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts",
+    "test:contract": "PI_RUN_HERDR_CONTRACT=1 node --test test/herdr-schema-contract.test.ts",
+    "test:integration:no-model": "node --test test/integration/harness-selftest.test.ts && node --test test/integration/no-model-smoke.test.ts && node --test test/integration/no-model-workflow.test.ts",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.0 <1",
+    "@earendil-works/pi-coding-agent": ">=0.84.0 <1",
+    "@earendil-works/pi-tui": ">=0.84.0 <1",
+    "typebox": ">=1.0.0 <2"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/herdr-subagents/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@earendil-works/pi-tui": "^0.84.4",
+    "typebox": "^1.3.22",
+    "typescript": "^5.9.3"
+  }
+}
