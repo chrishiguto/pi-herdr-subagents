@@ -39,7 +39,12 @@ import {
   ResumeParamsSchema,
   SubagentParamsSchema,
   type InterruptParams,
+  type InterruptToolDetails,
+  type ListedChildDetails,
+  type ListToolDetails,
   type ResumeParams,
+  type ResumeToolDetails,
+  type SpawnToolDetails,
   type SubagentParams,
 } from "./tool-contracts.ts";
 import {
@@ -371,10 +376,10 @@ function registerSubagentTool(pi: ExtensionAPI): void {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
-      const name = details?.name ?? "(unnamed)";
+      const details = result.details as Partial<SpawnToolDetails>;
+      const name = details.name ?? "(unnamed)";
 
-      if (details?.status === "started") {
+      if (details.status === "started") {
         return new Text(
           theme.fg("accent", "▸") +
             " " +
@@ -580,10 +585,10 @@ function registerResumeTool(pi: ExtensionAPI): void {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
-      const name = details?.name ?? "Resume";
+      const details = result.details as Partial<ResumeToolDetails>;
+      const name = details.name ?? "Resume";
 
-      if (details?.status === "started") {
+      if (details.status === "started") {
         return new Text(
           theme.fg("accent", "▸") +
             " " +
@@ -602,13 +607,6 @@ function registerResumeTool(pi: ExtensionAPI): void {
 }
 
 // ── subagent_interrupt ──────────────────────────────────────────────────────
-
-interface InterruptToolDetails {
-  error?: string;
-  id?: string;
-  name?: string;
-  status?: "interrupt_requested";
-}
 
 async function handleSubagentInterrupt(params: InterruptParams): Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -668,8 +666,8 @@ function registerInterruptTool(pi: ExtensionAPI): void {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
-      if (details?.status === "interrupt_requested") {
+      const details = result.details as InterruptToolDetails;
+      if (details.status === "interrupt_requested") {
         return new Text(
           theme.fg("accent", "▸") +
             " " +
@@ -724,13 +722,13 @@ function registerListTool(pi: ExtensionAPI): void {
     },
 
     renderResult(result, _opts, theme) {
-      const details = result.details as any;
-      const children = details?.children ?? [];
+      const details = result.details as Partial<ListToolDetails>;
+      const children = details.children ?? [];
       if (children.length === 0) {
         return new Text(theme.fg("dim", "No active subagents."), 0, 0);
       }
       const lines = children.map(
-        (child: any) =>
+        (child: ListedChildDetails) =>
           `  ${theme.fg("toolTitle", theme.bold(child.name))}` +
           theme.fg(
             "dim",
