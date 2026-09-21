@@ -1,7 +1,7 @@
 # The guard for an unpinned git package source: consumers follow main, so
-# main has to stay green. The job timeout is the hard cap; the step timeouts
-# exist so a stalled herdr, tmux, or pi names its step in the run log
-# instead of holding the runner until the job cap.
+# main has to stay green. The suites run against the herdr and pi the
+# manifest declares support for; a stalled herdr, tmux, or pi names its
+# step in the run log instead of holding the runner until the job cap.
 name: CI
 
 on:
@@ -12,49 +12,24 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
-  # The herdr and pi the suites run against, fixed to one llm-agents.nix
-  # revision so a toolchain move is a reviewed change here. This revision
-  # ships herdr 0.9.0 (protocol 22), ahead of the manifest's herdr contract;
-  # the contract step below accounts for that.
-  LLM_AGENTS_FLAKE: github:numtide/llm-agents.nix/e58be6a4ee2ec223cfd8d9b323845aa8e60d2e2e
+  # The llm-agents.nix revision that ships the herdr this package supports
+  # (0.8.2, protocol 20, per the manifest's herdr field). Bump it together
+  # with the manifest, compatibility.ts, and the contract test when the
+  # package moves to a newer herdr protocol.
+  LLM_AGENTS: github:numtide/llm-agents.nix/f9a83fd4942a37f2e2c7a07a4d508dbaaee968f8
 
 jobs:
   check:
-    name: Typecheck, unit, contract, and no-model integration suites
+    name: Typecheck and test
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Check out repository
-        timeout-minutes: 2
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install Nix
-        timeout-minutes: 5
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          # CI must trust the numtide cache, or llm-agents packages fall back
-          # to source builds and exhaust the runner disk.
-          extra_nix_config: |
-            extra-substituters = https://cache.numtide.com
-            extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
-      - name: Build herdr and pi from llm-agents.nix
-        timeout-minutes: 15
-        run: |
-          for package in herdr pi; do
-            echo "$(nix build --no-link --print-out-paths "$LLM_AGENTS_FLAKE#$package")/bin" >> "$GITHUB_PATH"
-          done
-      - name: Install tmux for the integration harness
-        timeout-minutes: 3
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux
       - name: Install pnpm
-        timeout-minutes: 2
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - name: Install Node
-        timeout-minutes: 3
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -62,48 +37,44 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 5
         run: pnpm install --frozen-lockfile
+      - name: Typecheck and unit-test
+        timeout-minutes: 10
+        run: |
+          pnpm run typecheck
+          pnpm run test
+      # The contract and no-model suites drive real herdr and real pi, so the
+      # cheap checks run before the fetch.
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          # ci must trust the numtide cache, or llm-agents packages fall back
+          # to source builds and exhaust the runner disk
+          extra_nix_config: |
+            extra-substituters = https://cache.numtide.com
+            extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+      - name: Fetch herdr and pi
+        timeout-minutes: 15
+        # explicit bash adds pipefail, so a failed fetch fails here rather
+        # than as "command not found" in the probe step
+        shell: bash
+        run: nix build --no-link --print-out-paths "$LLM_AGENTS#herdr" "$LLM_AGENTS#pi" | sed 's|$|/bin|' >> "$GITHUB_PATH"
+      - name: Install tmux for the integration harness
+        timeout-minutes: 3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux
       - name: Probe the toolchain
         timeout-minutes: 2
         run: |
           herdr --version
           pi --version
           tmux -V
-      - name: Typecheck
-        timeout-minutes: 5
-        run: pnpm run typecheck
-      - name: Run the unit suite
-        timeout-minutes: 10
-        run: pnpm run test
-      # The manifest's herdr.protocol is the contract the suite asserts. While
-      # the pinned herdr reports a different protocol the suite must fail on
-      # exactly that assertion, and nothing else; once the manifest catches up
-      # the same step demands a pass. Either way the summary states which.
       - name: Run the herdr schema contract suite
-        timeout-minutes: 2
-        run: |
-          expected=$(jq -r .herdr.protocol package.json)
-          actual=$(herdr api schema --json | jq -r .protocol)
-          if [ "$actual" = "$expected" ]; then
-            pnpm run test:contract
-            printf '## herdr schema contract\npassed: herdr reports protocol %s, matching the manifest\n' "$actual" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if output=$(pnpm run test:contract 2>&1); then
-            echo "::error::the contract suite passed although herdr reports protocol $actual and the manifest expects $expected"
-            exit 1
-          fi
-          if ! grep -Eq "actual: $actual\b" <<<"$output" || ! grep -Eq "expected: $expected\b" <<<"$output"; then
-            echo "$output"
-            echo "::error::the contract suite failed for a reason other than the protocol mismatch"
-            exit 1
-          fi
-          printf '## herdr schema contract\nexpected failure: herdr reports protocol %s, the manifest and contract expect %s\n' "$actual" "$expected" >> "$GITHUB_STEP_SUMMARY"
+        timeout-minutes: 5
+        run: pnpm run test:contract
       - name: Run the no-model integration suites
         timeout-minutes: 10
         run: pnpm run test:integration:no-model
       - name: Dump leftover tmux sessions and herdr or pi processes
         if: failure()
-        timeout-minutes: 1
         run: |
           tmux ls || true
           pgrep -af 'herdr|[ /]pi( |$)' || true

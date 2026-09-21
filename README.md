@@ -14,13 +14,13 @@ the package supports only pi children in herdr. for tmux, cmux, zellij, wezterm,
 
 ## install
 
-requires node 22+, pi 0.84+, and herdr `>=0.8.2 <0.9` (protocol 20). pi must run inside a herdr pane.
+requires node 24+, pi 0.84+, and herdr `>=0.8.2 <0.9` (protocol 20). pi must run inside a herdr pane.
 
 ```sh
 pi install git:github.com/chrishiguto/pi-herdr-subagents
 ```
 
-the source is unpinned, so `pi update --extensions` follows `main`. [dotfiles](https://github.com/chrishiguto/dotfiles) consumes the package the same way and prefers a local checkout as a path source when one exists.
+the source is unpinned, so `pi update --extensions` follows `main`. [dotfiles](https://github.com/chrishiguto/dotfiles) consumes the package this way and refreshes it on `chezmoi apply`.
 
 then start pi from herdr:
 
