@@ -1,7 +1,6 @@
 # Single-package repository; this file carries pnpm settings only.
 # pnpm 11 refuses to install while dependency build scripts are unreviewed,
-# so the review is recorded here: esbuild may build, the rest may not.
+# so the review is recorded here: no dependency build script is approved.
 allowBuilds:
   "@google/genai": false
-  esbuild: true
   protobufjs: false
