@@ -120,6 +120,4 @@ describe("index: durable recovery", () => {
     assert.deepEqual(readDurableRecords(stateDir), []);
   });
 });
-
 // ── steer message renderers ────────────────────────────────────────────────
-

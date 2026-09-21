@@ -110,7 +110,6 @@ describe("index: activation guard", () => {
     assert.match(notifications[0].message, /herdr/i);
   });
 });
-
 // ── subagent tool execute ──────────────────────────────────────────────────
 
 
@@ -122,4 +121,3 @@ describe("index: renderers", () => {
     assert.ok(fake.renderers.has("subagent_ping"));
   });
 });
-

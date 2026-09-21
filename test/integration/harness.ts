@@ -1,7 +1,7 @@
 /**
  * Integration test harness — isolated named herdr session (Task 12).
  *
- * Bootstrap recipe (verified live against herdr 0.8.0 / protocol 19):
+ * Bootstrap recipe (verified live against herdr 0.8.2 / protocol 20):
  *   1. Create a DEDICATED tmux session (the herdr client needs a TTY).
  *   2. Run `herdr --session <unique name>` in it — this starts an isolated
  *      server with its own socket under ~/.config/herdr/sessions/<name>/.
@@ -60,8 +60,8 @@ const PROJECT_ROOT = resolve(HARNESS_DIR, "../..");
 /** Absolute path to the extension entry in the working tree (loaded via `pi -ne -e`). */
 export const EXTENSION_SOURCE = join(PROJECT_ROOT, "extensions", "herdr-subagents", "index.ts");
 
-/** Absolute herdr binary — tool-shell PATH may lack ~/.local/bin. */
-export const HERDR_BIN = process.env.HERDR_BIN ?? join(homedir(), ".local", "bin", "herdr");
+/** Herdr binary override, falling back to the workspace tool profile on PATH. */
+export const HERDR_BIN = process.env.HERDR_BIN ?? "herdr";
 
 /** Model for orchestrator + children. Override with PI_TEST_MODEL. */
 export const TEST_MODEL = process.env.PI_TEST_MODEL ?? "anthropic/claude-haiku-4-5";
@@ -83,8 +83,10 @@ export function integrationPrereqs(
       reason: "set PI_RUN_HERDR_INTEGRATION=1 to authorize isolated Herdr process tests",
     };
   }
-  if (!existsSync(HERDR_BIN)) {
-    return { ok: false, reason: `herdr binary not found at ${HERDR_BIN} (set HERDR_BIN)` };
+  try {
+    execFileSync(HERDR_BIN, ["--version"], { stdio: "pipe" });
+  } catch {
+    return { ok: false, reason: `herdr binary not found: ${HERDR_BIN} (set HERDR_BIN)` };
   }
   try {
     execFileSync("tmux", ["-V"], { stdio: "pipe" });

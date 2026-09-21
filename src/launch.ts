@@ -9,6 +9,7 @@
 // buildSubagentToolAllowlist / buildPiPromptArgs and artifact
 // conventions ported from pi-interactive-subagents (MIT, HazAT)
 // pi-extension/subagents/{index.ts,cmux.ts} @ fix/launch-verify-retry.
+import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -362,7 +363,7 @@ export function buildLaunchPlan(
 
   const env = ctx.env;
   const now = ctx.now ?? new Date();
-  const id = ctx.id ?? Math.random().toString(16).slice(2, 10);
+  const id = ctx.id ?? randomUUID().slice(0, 8);
 
   const effectiveModel = runtimePolicy.model;
   const effectiveTools = runtimePolicy.tools;
@@ -378,17 +379,12 @@ export function buildLaunchPlan(
   // Deterministic child session file path — each launch knows exactly which
   // file is its child's, eliminating races between concurrent spawns.
   const sessionTimestamp = now.toISOString().replace(/[:.]/g, "-").slice(0, 23) + "Z";
-  const uuid = [
-    id,
-    Math.random().toString(16).slice(2, 10),
-    Math.random().toString(16).slice(2, 10),
-    Math.random().toString(16).slice(2, 6),
-  ].join("-");
+  const uuid = `${id}-${randomUUID()}`;
   const sessionFile = join(childSessionDir, `${sessionTimestamp}_${uuid}.jsonl`);
 
   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
   const seedSession = {
-    mode: launchBehavior.seededSessionMode,
+    mode: launchBehavior.sessionMode,
     parentSessionFile: ctx.parentSessionFile,
     parentLeafId: ctx.parentLeafId,
     childSessionFile: sessionFile,
@@ -466,7 +462,6 @@ export function buildLaunchPlan(
       taskArg,
     });
   }
-  const piStartupArgv = [...piArgv];
 
   const denySet = resolveDenyTools(agentDefs, runtimePolicy.allowNestedDelegation);
   const denyTools = denySet.size > 0 ? [...denySet].join(",") : undefined;
@@ -513,7 +508,7 @@ export function buildLaunchPlan(
     },
     agentStart: {
       liveAgentName: makeLiveAgentName(params.name, id),
-      argv: piStartupArgv,
+      argv: piArgv,
     },
     initialPrompts,
     interactive,
@@ -563,7 +558,7 @@ export function buildResumeLaunchPlan(
 ): ResumeLaunchPlan {
   const env = ctx.env;
   const now = ctx.now ?? new Date();
-  const id = ctx.id ?? Math.random().toString(16).slice(2, 10);
+  const id = ctx.id ?? randomUUID().slice(0, 8);
   const displayName = params.name ?? "Resume";
   const policy = ctx.resumePolicy;
   const { autoExit, interactive } = lifecycleFlags(resolveResumeLifecycle(params, policy));
@@ -591,7 +586,6 @@ export function buildResumeLaunchPlan(
     files.push({ path: resumeMessageFile, content: params.message });
   }
   const initialPrompts = resumeMessageFile ? [`@${resumeMessageFile}`] : [];
-  const piStartupArgv = [...piArgv];
 
   const childEnv = buildChildEnv({
     env,
@@ -616,7 +610,7 @@ export function buildResumeLaunchPlan(
     },
     agentStart: {
       liveAgentName: makeLiveAgentName(displayName, id),
-      argv: piStartupArgv,
+      argv: piArgv,
     },
     initialPrompts,
     interactive,

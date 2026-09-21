@@ -166,7 +166,6 @@ export function resolveLaunchBehavior(
   agentDefs: AgentDefaults | null,
 ): {
   sessionMode: SubagentSessionMode;
-  seededSessionMode: SubagentSessionMode;
   inheritsConversationContext: boolean;
   taskDelivery: "direct" | "artifact";
 } {
@@ -174,7 +173,6 @@ export function resolveLaunchBehavior(
   const inheritsConversationContext = sessionMode === "fork";
   return {
     sessionMode,
-    seededSessionMode: sessionMode,
     inheritsConversationContext,
     taskDelivery: inheritsConversationContext ? "direct" : "artifact",
   };

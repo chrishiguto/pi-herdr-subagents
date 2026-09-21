@@ -778,4 +778,3 @@ describe("index: subagent tool", () => {
     assert.match(result.content[0].text, /not supported/);
   });
 });
-

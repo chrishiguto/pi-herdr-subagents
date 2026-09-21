@@ -55,7 +55,7 @@ describe("package", () => {
 
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
     assert.deepEqual(pkg.pi.extensions, ["./extensions/herdr-subagents/index.ts"]);
-    assert.equal(pkg.engines.node, ">=22");
+    assert.equal(pkg.engines.node, ">=24");
     assert.deepEqual(pkg.herdr, { version: ">=0.8.2 <0.9", protocol: 20 });
     assert.match(pkg.peerDependencies["@earendil-works/pi-ai"], />=0\.84\.0/);
     assert.match(pkg.peerDependencies["@earendil-works/pi-coding-agent"], />=0\.84\.0/);
@@ -73,7 +73,7 @@ describe("package", () => {
       }),
     );
     const paths = packed.files.map((file: { path: string }) => file.path);
-    assert.ok(paths.includes("LICENSE"));
+    assert.ok(paths.includes("README.md"));
     assert.ok(paths.includes("extensions/herdr-subagents/index.ts"));
     assert.ok(!paths.includes("subagent-done.ts"));
     assert.ok(paths.includes("src/child-runtime.ts"));

@@ -16,21 +16,8 @@ the package supports only pi children in herdr. for tmux, cmux, zellij, wezterm,
 
 requires node 22+, pi 0.84+, and herdr `>=0.8.2 <0.9` (protocol 20). pi must run inside a herdr pane.
 
-add the package to `~/.pi/agent/settings.json`:
-
-```jsonc
-{
-  "packages": ["git:github.com/chrishiguto/pi-herdr-subagents"]
-}
-```
-
-or use a local checkout:
-
-```jsonc
-{
-  "packages": ["/path/to/pi-herdr-subagents"]
-}
-```
+load this Pi package from the [dotfiles Pi workspace](https://github.com/chrishiguto/dotfiles/tree/main/pi):
+the managed Pi settings load `pi/packages/herdr-subagents` directly from that checkout. edit the source and use `/reload` to pick up changes.
 
 then start pi from herdr:
 
@@ -95,10 +82,10 @@ outside herdr, the tools report the missing setup instead of disappearing. set `
 ## development
 
 ```sh
-npm run typecheck
-npm test
-npm run test:integration:no-model
-PI_RUN_HERDR_INTEGRATION=1 npm run test:integration
+pnpm typecheck
+pnpm test
+pnpm test:integration:no-model
+PI_RUN_HERDR_INTEGRATION=1 pnpm test:integration
 ```
 
 the integration harness uses isolated tmux and herdr sessions and will not touch the default herdr socket.

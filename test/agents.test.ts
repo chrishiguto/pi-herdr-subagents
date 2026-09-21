@@ -394,7 +394,6 @@ describe("agents.ts", () => {
     it("resolves launch behavior for standalone, lineage-only, and fork modes", () => {
       assert.deepEqual(resolveLaunchBehavior({ name: "A", task: "T" }, null), {
         sessionMode: "lineage-only",
-        seededSessionMode: "lineage-only",
         inheritsConversationContext: false,
         taskDelivery: "artifact",
       });
@@ -402,8 +401,7 @@ describe("agents.ts", () => {
         resolveLaunchBehavior({ name: "A", task: "T", contextMode: "standalone" }, null),
         {
           sessionMode: "standalone",
-          seededSessionMode: "standalone",
-          inheritsConversationContext: false,
+            inheritsConversationContext: false,
           taskDelivery: "artifact",
         },
       );
@@ -411,14 +409,12 @@ describe("agents.ts", () => {
         resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "lineage-only" }),
         {
           sessionMode: "lineage-only",
-          seededSessionMode: "lineage-only",
-          inheritsConversationContext: false,
+            inheritsConversationContext: false,
           taskDelivery: "artifact",
         },
       );
       assert.deepEqual(resolveLaunchBehavior({ name: "A", task: "T" }, { sessionMode: "fork" }), {
         sessionMode: "fork",
-        seededSessionMode: "fork",
         inheritsConversationContext: true,
         taskDelivery: "direct",
       });
