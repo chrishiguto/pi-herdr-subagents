@@ -1,0 +1,94 @@
+# The guard for an unpinned git package source: consumers follow main, so
+# main has to stay green. Every step that launches a process is bounded so a
+# stalled herdr, tmux, or pi names its step in the job summary instead of
+# holding the runner for the six-hour default.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # herdr and pi come from llm-agents.nix at a fixed revision. Bump the
+  # revision to move the toolchain the suites run against.
+  LLM_AGENTS: github:numtide/llm-agents.nix/e58be6a4ee2ec223cfd8d9b323845aa8e60d2e2e
+
+jobs:
+  check:
+    name: Typecheck, unit, contract, and no-model integration suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          # ci must trust the numtide cache, or llm-agents packages fall back
+          # to source builds and exhaust the runner disk
+          extra_nix_config: |
+            extra-substituters = https://cache.numtide.com
+            extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+      - name: Build herdr and pi from llm-agents.nix
+        timeout-minutes: 15
+        run: |
+          for package in herdr pi; do
+            echo "$(nix build --no-link --print-out-paths "$LLM_AGENTS#$package")/bin" >> "$GITHUB_PATH"
+          done
+      - name: Install tmux for the integration harness
+        timeout-minutes: 3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tmux
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        timeout-minutes: 5
+        run: pnpm install --frozen-lockfile
+      - name: Probe the toolchain
+        timeout-minutes: 2
+        run: |
+          herdr --version
+          pi --version
+          tmux -V
+          herdr api schema --json | jq '{protocol, schema_version}'
+      - name: Typecheck
+        timeout-minutes: 5
+        run: pnpm run typecheck
+      - name: Run the unit suite
+        timeout-minutes: 10
+        run: pnpm test
+      # The pinned herdr reports protocol 22 while the contract (and the
+      # manifest's herdr.protocol) still say 20. The suite runs and its
+      # outcome is asserted below, so the drift is visible, not skipped.
+      - name: Run the herdr schema contract suite (expected to fail)
+        id: contract
+        timeout-minutes: 2
+        continue-on-error: true
+        run: pnpm run test:contract
+      - name: Record and assert the contract outcome
+        if: always() && steps.contract.outcome != 'skipped'
+        env:
+          OUTCOME: ${{ steps.contract.outcome }}
+        run: |
+          {
+            echo "## herdr schema contract"
+            echo "outcome: **$OUTCOME** (expected: failure while the pinned herdr reports protocol 22 and the contract expects 20)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::the contract suite no longer fails; drop continue-on-error from the contract step"
+            exit 1
+          fi
+      - name: Run the no-model integration suites
+        timeout-minutes: 10
+        run: pnpm run test:integration:no-model
+      - name: Dump leftover herdr, tmux, and pi processes
+        if: failure()
+        run: pgrep -af 'herdr|tmux|[ /]pi( |$)' || true
